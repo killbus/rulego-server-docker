@@ -1,0 +1,62 @@
+#!/usr/bin/env bash
+
+set -Eeuo pipefail
+
+source_root=${RULEGO_HOST_SOURCE:-/opt/rulego/source/server}
+build_environment=${RULEGO_BUILD_ENV:-/opt/rulego/build.env}
+manifest=${RULEGO_ABI_MANIFEST:-/abi-manifest.json}
+output_root=${RULEGO_OUTPUT_ROOT:-/out/rootfs}
+editor_source=${RULEGO_EDITOR_SOURCE:-/opt/rulego/editor}
+
+die() {
+  printf 'error: %s\n' "$*" >&2
+  exit 1
+}
+
+[[ -f ${build_environment} && -f ${manifest} && -f ${editor_source}/index.html ]] || die 'Plugin ABI build inputs are incomplete'
+# shellcheck disable=SC1090
+source "${build_environment}"
+
+[[ "sha256:$(sha256sum "${manifest}" | awk '{print $1}')" == "${LOCK_DIGEST}" ]] || die 'Plugin ABI manifest digest mismatch'
+[[ $(GOENV="${GOENV}" GOTOOLCHAIN="${GOTOOLCHAIN}" go env GOVERSION) == "go${GO_VERSION}" ]] || die 'host Go version mismatch'
+[[ $(GOENV="${GOENV}" GOTOOLCHAIN="${GOTOOLCHAIN}" go env GOARCH) == "${GOARCH}" ]] || die 'host architecture mismatch'
+[[ $("${CC}" -dumpfullversion) == "${CC_VERSION}" ]] || die 'host C compiler mismatch'
+linker_output=$("${LINKER_COMMAND}" --version 2>&1)
+grep -Fq -- "${LINKER_IDENTITY}" <<<"${linker_output}" || die 'host linker identity mismatch'
+grep -Fq -- "${LINKER_VERSION}" <<<"${linker_output}" || die 'host linker version mismatch'
+[[ $(sha256sum "${source_root}/go.mod" | awk '{print $1}') == "${SERVER_GO_MOD_SHA256}" ]] || die 'host go.mod digest mismatch'
+[[ $(sha256sum "${source_root}/go.sum" | awk '{print $1}') == "${SERVER_GO_SUM_SHA256}" ]] || die 'host go.sum digest mismatch'
+
+mkdir -p "${output_root}/data" "${output_root}/editor" /tmp/rulego-host-home /tmp/rulego-host-cache
+# Assigned by the validated, generated build.env.
+# shellcheck disable=SC2153
+read -r -a host_flags <<<"${HOST_FLAGS}"
+tags=()
+if [[ -n ${HOST_TAGS} ]]; then tags=(-tags "${HOST_TAGS}"); fi
+ldflags=()
+if [[ -n ${HOST_LDFLAGS} ]]; then ldflags=(-ldflags "${HOST_LDFLAGS}"); fi
+
+(
+  cd "${source_root}"
+  env -i \
+    PATH="${PATH}" HOME=/tmp/rulego-host-home TMPDIR=/tmp \
+    GOMODCACHE=/go/pkg/mod GOCACHE=/tmp/rulego-host-cache \
+    GOENV="${GOENV}" GOTOOLCHAIN="${GOTOOLCHAIN}" GOFLAGS="${GOFLAGS}" GOEXPERIMENT="${GOEXPERIMENT}" \
+    CGO_ENABLED="${CGO_ENABLED}" GOOS="${GOOS}" GOARCH="${GOARCH}" GOWORK="${HOST_WORKSPACE}" \
+    CC="${CC}" CXX="${CXX}" \
+    CGO_CFLAGS="${CGO_CFLAGS}" CGO_CPPFLAGS="${CGO_CPPFLAGS}" \
+    CGO_CXXFLAGS="${CGO_CXXFLAGS}" CGO_LDFLAGS="${CGO_LDFLAGS}" \
+    "${TUNING_KEY}=${TUNING_VALUE}" GOPROXY=off GOSUMDB=off \
+    go build "-buildmode=${HOST_MODE}" "${host_flags[@]}" "${tags[@]}" "${ldflags[@]}" \
+      -o "${output_root}/rulego-server" ./cmd/server
+)
+
+go version -m "${output_root}/rulego-server" >"${output_root}/rulego-server.buildinfo"
+grep -Fq "go${GO_VERSION}" "${output_root}/rulego-server.buildinfo" || die 'host metadata has the wrong Go version'
+grep -Fq $'build\tCGO_ENABLED='"${CGO_ENABLED}" "${output_root}/rulego-server.buildinfo" || die 'host metadata has the wrong CGO setting'
+grep -Fq $'build\tGOARCH='"${GOARCH}" "${output_root}/rulego-server.buildinfo" || die 'host metadata has the wrong architecture'
+grep -Fq $'dep\t'"${CORE_MODULE}"$'\t'"${CORE_VERSION}" "${output_root}/rulego-server.buildinfo" || die 'host metadata has the wrong RuleGo Core version'
+
+cp -- "${source_root}/config.conf" "${source_root}/node_pool.json" "${output_root}/"
+cp -a -- "${editor_source}/." "${output_root}/editor/"
+chmod 0755 "${output_root}/rulego-server"

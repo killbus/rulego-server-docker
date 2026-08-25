@@ -1,0 +1,132 @@
+#!/usr/bin/env bash
+
+set -Eeuo pipefail
+
+plugin_package=${1:-.}
+output=${2:-/output/plugin.so}
+plugin_source=${RULEGO_PLUGIN_SOURCE:-/workspace}
+manifest=${RULEGO_ABI_MANIFEST:-/usr/share/rulego/plugin-abi.json}
+host_source=${RULEGO_HOST_SOURCE:-/opt/rulego/source/server}
+host_modules=${RULEGO_HOST_MODULES:-/opt/rulego/host-modules.tsv}
+build_environment=${RULEGO_BUILD_ENV:-/opt/rulego/build.env}
+
+die() {
+  printf 'error: %s\n' "$*" >&2
+  exit 1
+}
+
+for command_name in go sha256sum awk; do
+  command -v "${command_name}" >/dev/null 2>&1 || die "required command not found: ${command_name}"
+done
+[[ -f ${manifest} && -f ${host_modules} && -f ${build_environment} ]] || die 'SDK ABI inputs are incomplete'
+[[ -f ${host_source}/go.mod && -f ${host_source}/go.sum ]] || die 'SDK RuleGo source is incomplete'
+[[ -f ${plugin_source}/go.mod ]] || die "plugin Go module is missing: ${plugin_source}"
+# shellcheck disable=SC1090
+source "${build_environment}"
+
+[[ "sha256:$(sha256sum "${manifest}" | awk '{print $1}')" == "${LOCK_DIGEST}" ]] || die 'SDK ABI manifest digest mismatch'
+[[ $(sha256sum "${host_source}/go.mod" | awk '{print $1}') == "${SERVER_GO_MOD_SHA256}" ]] || die 'SDK RuleGo go.mod digest mismatch'
+[[ $(sha256sum "${host_source}/go.sum" | awk '{print $1}') == "${SERVER_GO_SUM_SHA256}" ]] || die 'SDK RuleGo go.sum digest mismatch'
+[[ $(GOENV="${GOENV}" GOTOOLCHAIN="${GOTOOLCHAIN}" go env GOVERSION) == "go${GO_VERSION}" ]] || die 'SDK Go version does not match the ABI manifest'
+[[ $(GOENV="${GOENV}" GOTOOLCHAIN="${GOTOOLCHAIN}" go env GOOS) == "${GOOS}" ]] || die 'SDK GOOS does not match the ABI manifest'
+[[ $(GOENV="${GOENV}" GOTOOLCHAIN="${GOTOOLCHAIN}" go env GOARCH) == "${GOARCH}" ]] || die 'SDK GOARCH does not match the ABI manifest'
+[[ ${CGO_ENABLED} == 1 ]] || die 'SDK ABI requires CGO'
+[[ $("${CC}" -dumpfullversion) == "${CC_VERSION}" ]] || die 'SDK C compiler mismatch'
+linker_output=$("${LINKER_COMMAND}" --version 2>&1)
+grep -Fq -- "${LINKER_IDENTITY}" <<<"${linker_output}" || die 'SDK linker identity mismatch'
+grep -Fq -- "${LINKER_VERSION}" <<<"${linker_output}" || die 'SDK linker version mismatch'
+
+work=$(mktemp -d /tmp/rulego-plugin-build.XXXXXX)
+trap 'rm -rf -- "${work}"' EXIT
+mkdir -p "${work}/home" "${work}/cache" "$(dirname -- "${output}")"
+GOENV="${GOENV}" GOTOOLCHAIN="${GOTOOLCHAIN}" go -C "${work}" work init "${plugin_source}" "${host_source}"
+
+go_env=(
+  env -i
+  "PATH=${PATH}"
+  "HOME=${work}/home"
+  "TMPDIR=${work}"
+  GOMODCACHE=/go/pkg/mod
+  "GOCACHE=${work}/cache"
+  "GOENV=${GOENV}"
+  "GOTOOLCHAIN=${GOTOOLCHAIN}"
+  "GOFLAGS=${GOFLAGS}"
+  "GOEXPERIMENT=${GOEXPERIMENT}"
+  "CGO_ENABLED=${CGO_ENABLED}"
+  "GOOS=${GOOS}"
+  "GOARCH=${GOARCH}"
+  "GOWORK=${work}/go.work"
+  "CC=${CC}"
+  "CXX=${CXX}"
+  "CGO_CFLAGS=${CGO_CFLAGS}"
+  "CGO_CPPFLAGS=${CGO_CPPFLAGS}"
+  "CGO_CXXFLAGS=${CGO_CXXFLAGS}"
+  "CGO_LDFLAGS=${CGO_LDFLAGS}"
+  "${TUNING_KEY}=${TUNING_VALUE}"
+)
+
+(cd "${plugin_source}" && "${go_env[@]}" go mod download all)
+# Build flags can affect package loading too (notably -buildvcs=false for a
+# read-only checkout), so dependency discovery must use the same locked flags.
+# Assigned by the validated, generated build.env.
+# shellcheck disable=SC2153
+read -r -a plugin_flags <<<"${PLUGIN_FLAGS}"
+dependency_modules=${work}/plugin-dependency-modules.txt
+(cd "${plugin_source}" && "${go_env[@]}" go list -deps "${plugin_flags[@]}" \
+  -f '{{with .Module}}{{.Path}}{{end}}' "${plugin_package}" \
+  | awk 'NF' | LC_ALL=C sort -u >"${dependency_modules}")
+module_identity_template='{{.Path}}{{"\t"}}{{.Version}}{{"\t"}}{{.Main}}{{"\t"}}{{with .Replace}}{{.Path}}{{end}}{{"\t"}}{{with .Replace}}{{.Version}}{{end}}{{"\t"}}{{.Sum}}{{"\t"}}{{.GoModSum}}'
+(cd "${plugin_source}" && "${go_env[@]}" go list -m -f "${module_identity_template}" all \
+  | LC_ALL=C sort >"${work}/host-modules.tsv")
+awk -F '\t' -v dependency_file="${dependency_modules}" -v expected_file="${host_modules}" '
+  function present(value) { return value == "" ? "<empty>" : value }
+  function describe(row, fields, replacement) {
+    split(row, fields, FS)
+    replacement = fields[4] == "" ? "<none>" : fields[4] "@" present(fields[5])
+    return "version=" present(fields[2]) ", replacement=" replacement \
+      ", sum=" present(fields[6]) ", go_mod_sum=" present(fields[7])
+  }
+  FILENAME == dependency_file { dependencies[$1] = 1; next }
+  FILENAME == expected_file {
+    if ($1 in dependencies) {
+      expected[$1] = $0
+      expected_identity[$1] = $2 FS $4 FS $5 FS $6 FS $7
+    }
+    next
+  }
+  {
+    actual[$1] = $0
+    actual_identity[$1] = $2 FS $4 FS $5 FS $6 FS $7
+  }
+  END {
+    failed = 0
+    for (path in expected) {
+      if (!(path in actual) || actual_identity[path] != expected_identity[path]) {
+        print "host-owned module identity mismatch: " path > "/dev/stderr"
+        print "  expected: " describe(expected[path]) > "/dev/stderr"
+        print "  actual: " (path in actual ? describe(actual[path]) : "<missing>") > "/dev/stderr"
+        failed = 1
+      }
+    }
+    exit failed
+  }
+' "${dependency_modules}" "${host_modules}" "${work}/host-modules.tsv" \
+  || die 'plugin package dependencies change a host-owned module identity'
+(cd "${plugin_source}" && "${go_env[@]}" go mod verify) || die 'plugin workspace module content verification failed'
+
+ldflags=()
+if [[ -n ${PLUGIN_LDFLAGS} ]]; then ldflags=(-ldflags "${PLUGIN_LDFLAGS}"); fi
+(cd "${plugin_source}" && "${go_env[@]}" go build "-buildmode=${PLUGIN_MODE}" "${plugin_flags[@]}" "${ldflags[@]}" -o "${output}" "${plugin_package}")
+
+build_info=${work}/build-info.txt
+go version -m "${output}" >"${build_info}"
+grep -Fq "go${GO_VERSION}" "${build_info}" || die 'plugin metadata has the wrong Go version'
+grep -Fq $'build\t-buildmode='"${PLUGIN_MODE}" "${build_info}" || die 'plugin metadata has the wrong build mode'
+grep -Fq $'build\tCGO_ENABLED='"${CGO_ENABLED}" "${build_info}" || die 'plugin metadata has the wrong CGO setting'
+grep -Fq $'build\tGOARCH='"${GOARCH}" "${build_info}" || die 'plugin metadata has the wrong architecture'
+grep -Fq $'dep\t'"${CORE_MODULE}"$'\t'"${CORE_VERSION}" "${build_info}" || die 'plugin metadata has the wrong RuleGo Core version'
+
+digest=$(sha256sum "${output}" | awk '{print $1}')
+printf '%s  %s\n' "${digest}" "$(basename -- "${output}")" >"${output}.sha256"
+printf '{\n  "abi_id": "%s",\n  "platform": "%s/%s",\n  "lock_digest": "%s",\n  "plugin_sha256": "%s"\n}\n' \
+  "${ABI_ID}" "${GOOS}" "${GOARCH}" "${LOCK_DIGEST}" "${digest}" >"${output}.abi.json"

@@ -1,0 +1,16 @@
+ARG RUNTIME_BASE
+
+FROM ${RUNTIME_BASE}
+
+ARG ABI_MANIFEST_PATH
+
+WORKDIR /app
+COPY --chown=65532:65532 rootfs/ /app/
+COPY manifest/plugin-abi.json ${ABI_MANIFEST_PATH}
+
+USER 65532:65532
+EXPOSE 9090
+VOLUME ["/app/data"]
+
+ENTRYPOINT ["/app/rulego-server"]
+CMD ["-c", "/app/config.conf"]

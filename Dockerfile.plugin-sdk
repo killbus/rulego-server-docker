@@ -1,0 +1,31 @@
+ARG SDK_BASE
+
+FROM ${SDK_BASE}
+
+ARG TARGETARCH
+ARG ABI_MANIFEST_PATH
+
+COPY source/ /opt/rulego/source/
+COPY --chown=65532:65532 gomodcache/ /go/pkg/mod/
+COPY manifest/module-list.txt /opt/rulego/module-list.txt
+COPY manifest/host-modules.tsv /opt/rulego/host-modules.tsv
+COPY manifest/build.env /opt/rulego/build.env
+COPY manifest/plugin-abi.json /abi-manifest.json
+COPY rulego-plugin-build /usr/local/bin/rulego-plugin-build
+COPY build-plugin-host /usr/local/bin/build-plugin-host
+
+RUN set -eu; \
+    . /opt/rulego/build.env; \
+    test "${TARGETARCH}" = "${GOARCH}"; \
+    test "$(GOENV="${GOENV}" GOTOOLCHAIN="${GOTOOLCHAIN}" go env GOVERSION)" = "go${GO_VERSION}"; \
+    test "$("${CC}" -dumpfullversion)" = "${CC_VERSION}"; \
+    linker_output=$("${LINKER_COMMAND}" --version 2>&1); \
+    printf '%s\n' "${linker_output}" | grep -F "${LINKER_IDENTITY}"; \
+    printf '%s\n' "${linker_output}" | grep -F "${LINKER_VERSION}"; \
+    test "sha256:$(sha256sum /abi-manifest.json | awk '{print $1}')" = "${LOCK_DIGEST}"; \
+    mkdir -p "$(dirname "${ABI_MANIFEST_PATH}")"; \
+    cp /abi-manifest.json "${ABI_MANIFEST_PATH}"
+
+WORKDIR /workspace
+USER 65532:65532
+ENTRYPOINT ["/usr/local/bin/rulego-plugin-build"]

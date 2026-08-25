@@ -1,4 +1,6 @@
 **
 !Dockerfile
+!Dockerfile.plugin-sdk
+!Dockerfile.plugin-runtime
 !build/
 !build/**
