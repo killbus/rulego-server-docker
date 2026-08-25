@@ -191,4 +191,34 @@ run_manifest_case 'missing' false 1 1
 run_manifest_case 'plain-notfound' false 1 1
 run_manifest_case 'notfound,complete' true 2 0
 
+run_reference_case() {
+  local sequence=$1
+  local expected_count=$2
+  local expected_status=$3
+  rm -f -- "${test_root}/state"
+  : >"${test_root}/sleeps"
+  set +e
+  # shellcheck disable=SC2016
+  output=$(env \
+    PATH="${test_root}/bin:${PATH}" \
+    MOCK_SEQUENCE="${sequence}" \
+    MOCK_SLEEPS="${test_root}/sleeps" \
+    MOCK_STATE="${test_root}/state" \
+    REGISTRY_RETRY_ATTEMPTS=3 \
+    REGISTRY_RETRY_INITIAL_DELAY=1 \
+    REGISTRY_RETRY_MAX_DELAY=2 \
+    LIB_PATH="${repository_root}/scripts/lib.sh" \
+    bash -c 'source "$LIB_PATH"; image_reference_digest "registry.invalid/example:test"' \
+    2>"${test_root}/stderr")
+  status=$?
+  set -e
+  [[ ${status} == "${expected_status}" ]]
+  [[ $(<"${test_root}/state") == "${expected_count}" ]]
+}
+
+run_reference_case 'error,missing' 2 0
+[[ ${output} == sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa ]]
+run_reference_case 'invalid,complete' 2 0
+run_reference_case 'notfound' 1 1
+
 echo 'bounded network retries and complete manifest validation passed'

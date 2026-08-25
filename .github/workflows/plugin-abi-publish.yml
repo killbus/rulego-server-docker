@@ -1,0 +1,135 @@
+name: Publish RuleGo Plugin ABI images
+
+on:
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: Publish release-ready immutable ABI tags to GHCR
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: plugin-abi-release
+  cancel-in-progress: false
+
+jobs:
+  contract:
+    if: ${{ inputs.publish }}
+    name: Validate release contract
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    outputs:
+      matrix: ${{ steps.contract.outputs.matrix }}
+    steps:
+      - name: Check out repository
+        # actions/checkout v7.0.1
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Render native matrix
+        id: contract
+        run: |
+          scripts/plugin-abi.sh validate --release
+          echo "matrix=$(scripts/plugin-abi.sh render matrix)" >>"$GITHUB_OUTPUT"
+
+  native:
+    name: Stage verified ${{ matrix.goarch }} images
+    needs: contract
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 120
+    environment: plugin-abi-release
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.contract.outputs.matrix) }}
+    steps:
+      - name: Check out repository
+        # actions/checkout v7.0.1
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Set up Docker Buildx
+        # docker/setup-buildx-action v4.3.0
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e
+        with:
+          driver-opts: network=host
+          buildkitd-config-inline: |
+            [registry."localhost:5000"]
+              http = true
+              insecure = true
+      - name: Log in to GHCR
+        # docker/login-action v4.6.0
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build, verify, and stage native artifacts
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PLUGIN_ABI_PUBLISH: "true"
+        run: scripts/plugin-abi-build.sh "${{ matrix.goarch }}"
+      - name: Upload native evidence
+        # actions/upload-artifact v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: plugin-abi-${{ matrix.goarch }}
+          path: tmp/plugin-abi-${{ matrix.goarch }}.json
+          if-no-files-found: error
+
+  publish:
+    name: Publish immutable indexes
+    needs: [contract, native]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    environment: plugin-abi-release
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Check out repository
+        # actions/checkout v7.0.1
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Download native evidence
+        # actions/download-artifact v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          pattern: plugin-abi-*
+          path: tmp/evidence
+          merge-multiple: true
+      - name: Set up QEMU
+        # docker/setup-qemu-action v4.2.0
+        uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8
+        with:
+          platforms: arm64
+      - name: Set up Docker Buildx
+        # docker/setup-buildx-action v4.3.0
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e
+      - name: Log in to GHCR
+        # docker/login-action v4.6.0
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Publish and verify immutable indexes
+        env:
+          PLUGIN_ABI_PUBLISH: "true"
+        run: scripts/plugin-abi-publish.sh tmp/evidence
+      - name: Upload release record
+        # actions/upload-artifact v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: plugin-abi-release-${{ github.sha }}
+          path: |
+            tmp/plugin-abi-release.json
+            tmp/published-sizes.tsv
+          if-no-files-found: error

@@ -164,6 +164,65 @@ sha256_file() {
   sha256sum "$1" | awk '{print $1}'
 }
 
+assert_elf_glibc_max() {
+  local elf=${1:?ELF path is required}
+  local maximum_allowed=${2:?maximum GLIBC version is required}
+  [[ ${maximum_allowed} =~ ^[0-9]+\.[0-9]+([.][0-9]+)?$ ]] \
+    || die "invalid maximum GLIBC version: ${maximum_allowed}"
+  require_command readelf sort
+
+  local imported maximum_found
+  if ! imported=$(readelf --version-info "${elf}" \
+    | grep -oE 'GLIBC_[0-9]+([.][0-9]+)+' \
+    | sed 's/^GLIBC_//' \
+    | LC_ALL=C sort -Vu); then
+    die "could not inspect versioned GLIBC imports: ${elf}"
+  fi
+  [[ -n ${imported} ]] || die "ELF imports no versioned GLIBC symbols: ${elf}"
+  maximum_found=$(tail -n 1 <<<"${imported}")
+  [[ $(printf '%s\n%s\n' "${maximum_found}" "${maximum_allowed}" | sort -V | tail -n 1) == "${maximum_allowed}" ]] \
+    || die "ELF requires GLIBC_${maximum_found}, above locked GLIBC_${maximum_allowed}: ${elf}"
+}
+
+extract_safe_tar() {
+  local archive=${1:?tar archive is required}
+  local destination=${2:?extraction destination is required}
+  require_command python3
+  mkdir -p -- "${destination}"
+  python3 - "${archive}" "${destination}" <<'PY'
+import os
+from pathlib import Path, PurePosixPath
+import sys
+import tarfile
+
+archive = sys.argv[1]
+destination = Path(sys.argv[2]).resolve()
+
+with tarfile.open(archive, "r:*") as source:
+    members = source.getmembers()
+    seen = set()
+    for member in members:
+        name = member.name
+        path = PurePosixPath(name)
+        if (
+            not name
+            or "\\" in name
+            or path.is_absolute()
+            or any(part == ".." for part in path.parts)
+            or not (member.isfile() or member.isdir())
+        ):
+            raise SystemExit(f"unsafe tar member: {name}")
+        target = (destination / path).resolve()
+        if os.path.commonpath((destination, target)) != str(destination):
+            raise SystemExit(f"tar member escapes destination: {name}")
+        normalized = str(target.relative_to(destination))
+        if normalized in seen:
+            raise SystemExit(f"duplicate tar member: {name}")
+        seen.add(normalized)
+    source.extractall(destination, members=members, filter="data")
+PY
+}
+
 image_manifest_digest() {
   local image_reference=${1:?image reference is required}
   local wait_for_presence=${2:-false}
@@ -239,6 +298,86 @@ image_manifest_digest() {
     sleep "${delay}"
     delay=$(next_retry_delay "${delay}" "${max_delay}")
   done
+}
+
+image_reference_digest() {
+  local image_reference=${1:?image reference is required}
+  local attempts=${REGISTRY_RETRY_ATTEMPTS:-8}
+  local delay=${REGISTRY_RETRY_INITIAL_DELAY:-3}
+  local max_delay=${REGISTRY_RETRY_MAX_DELAY:-30}
+  require_positive_integer REGISTRY_RETRY_ATTEMPTS "${attempts}"
+  require_positive_integer REGISTRY_RETRY_INITIAL_DELAY "${delay}"
+  require_positive_integer REGISTRY_RETRY_MAX_DELAY "${max_delay}"
+
+  local temporary_dir manifest_file error_file attempt status digest retry_reason
+  temporary_dir=$(mktemp -d "${TMPDIR:-/tmp}/rulego-reference.XXXXXX")
+  manifest_file=${temporary_dir}/manifest.json
+  error_file=${temporary_dir}/error.log
+  for ((attempt = 1; attempt <= attempts; attempt += 1)); do
+    retry_reason=
+    : >"${error_file}"
+    if docker buildx imagetools inspect "${image_reference}" \
+      --format '{{json .Manifest}}' >"${manifest_file}" 2>"${error_file}"; then
+      if digest=$(jq -er '.digest | select(test("^sha256:[0-9a-f]{64}$"))' "${manifest_file}"); then
+        rm -rf -- "${temporary_dir}"
+        printf '%s\n' "${digest}"
+        return 0
+      fi
+      retry_reason='invalid manifest JSON or digest'
+    else
+      status=$?
+      if grep -Eqi 'manifest unknown|name unknown|(^|[[:space:]:])not found([[:space:]]|$)' "${error_file}"; then
+        rm -rf -- "${temporary_dir}"
+        return 1
+      fi
+      retry_reason="registry command exit ${status}"
+    fi
+    if ((attempt == attempts)); then
+      [[ ! -s ${error_file} ]] || cat "${error_file}" >&2
+      log "${retry_reason} after ${attempts} attempts: ${image_reference}"
+      rm -rf -- "${temporary_dir}"
+      return 2
+    fi
+    log "temporary ${retry_reason} for ${image_reference} (attempt ${attempt}/${attempts}); retrying in ${delay}s"
+    sleep "${delay}"
+    delay=$(next_retry_delay "${delay}" "${max_delay}")
+  done
+}
+
+verify_exact_image_children() {
+  local reference=${1:?image reference is required}
+  local amd64_digest=${2:?amd64 digest is required}
+  local arm64_digest=${3:?arm64 digest is required}
+  local output=${4:?manifest output path is required}
+
+  docker buildx imagetools inspect "${reference}" --format '{{json .Manifest}}' >"${output}"
+  jq -e --arg amd64 "${amd64_digest}" --arg arm64 "${arm64_digest}" '
+    ([.manifests[] | select(.platform.os == "linux") |
+      {architecture:.platform.architecture,digest:.digest}] | sort_by(.architecture)) ==
+    [{architecture:"amd64",digest:$amd64},{architecture:"arm64",digest:$arm64}]
+  ' "${output}" >/dev/null
+}
+
+publish_immutable_image_tag() {
+  local target=${1:?target image tag is required}
+  local source=${2:?source image digest is required}
+  local expected=${source##*@}
+  local existing status
+
+  [[ ${source} =~ @sha256:[0-9a-f]{64}$ ]] || die "source image must be addressed by digest: ${source}"
+  if existing=$(image_reference_digest "${target}"); then
+    [[ ${existing} == "${expected}" ]] || die "immutable tag already points to a different digest: ${target}"
+    printf '%s@%s\n' "${target%:*}" "${existing}"
+    return
+  else
+    status=$?
+    ((status == 1)) || return "${status}"
+  fi
+
+  retry_command 4 2 docker buildx imagetools create --tag "${target}" "${source}"
+  existing=$(image_reference_digest "${target}") || die "canonical tag was not published: ${target}"
+  [[ ${existing} == "${expected}" ]] || die "canonical index digest changed during publication: ${target}"
+  printf '%s@%s\n' "${target%:*}" "${existing}"
 }
 
 retry_command() {
