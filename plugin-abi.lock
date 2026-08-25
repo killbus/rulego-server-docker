@@ -1,0 +1,93 @@
+{
+  "schema_version": 1,
+  "abi_id": "abi-d4fc741b72b9dba1573b61029d6deba9d17c8c22f2805546a5a92764b5c404bf",
+  "abi": {
+    "go": {
+      "version": "1.25.0",
+      "compiler": "gc",
+      "cgo_enabled": true,
+      "goos": "linux",
+      "targets": [
+        {"platform": "linux/amd64", "goarch": "amd64", "tuning": {"GOAMD64": "v1"}, "cc": "gcc", "cxx": "g++"},
+        {"platform": "linux/arm64", "goarch": "arm64", "tuning": {"GOARM64": "v8.0"}, "cc": "gcc", "cxx": "g++"}
+      ],
+      "experiments": [],
+      "environment": {
+        "GOENV": "off",
+        "GOTOOLCHAIN": "local",
+        "GOFLAGS": "-mod=readonly",
+        "GOEXPERIMENT": "",
+        "CGO_CFLAGS": "",
+        "CGO_CPPFLAGS": "",
+        "CGO_CXXFLAGS": "",
+        "CGO_LDFLAGS": ""
+      }
+    },
+    "native": {
+      "libc": "glibc",
+      "minimum_version": "2.34",
+      "sdk_base": "docker.io/library/golang:1.25.0-bookworm@sha256:81dc45d05a7444ead8c92a389621fafabc8e40f8fd1a19d7e5df14e61e98bc1a",
+      "runtime_base": "gcr.io/distroless/base-debian12:nonroot@sha256:7f0c72cd138b442ae0deeb69c08b1acf5525439ba251a49ad93c320a061567e5",
+      "toolchains": [
+        {"goarch": "amd64", "cc": "gcc", "cc_version": "12.2.0", "linker_command": "ld", "linker": "GNU ld", "linker_version": "2.40"},
+        {"goarch": "arm64", "cc": "gcc", "cc_version": "12.2.0", "linker_command": "ld", "linker": "GNU ld", "linker_version": "2.40"}
+      ]
+    },
+    "rulego_server": {
+      "repository": "https://github.com/rulego/rulego",
+      "release_version": "v0.37.0",
+      "revision": "a7be24c4c1f649d422b41eb623d1d6e314b20c58",
+      "module": "github.com/rulego/rulego/server",
+      "go_mod_sha256": "66ed8ce3ab2902f81f7c0c48e7fc2ba49f0be6ed24f84858d2b4a530819ae164",
+      "go_sum_sha256": "420ec695297a2a62ad10e8037428b4029d20fc87320b6eee1fd3127eb8f67b2f"
+    },
+    "rulego_core": {
+      "module": "github.com/rulego/rulego",
+      "version": "v0.36.1-0.20260802040353-2ec085f29027",
+      "revision": "2ec085f2902777f10d0f867fa4295b11629257ad"
+    },
+    "module_graph": {
+      "list_sha256": "0b3633bf08ff0099730983219269db3f6c5ddd868012d89a30e5fdbb89d9d4e8",
+      "graph_sha256": "e339e96e957054393dbb57893fb45f58fd4844df02792ea6ca81415c14ac1953",
+      "replacements": []
+    },
+    "build": {
+      "host_mode": "exe",
+      "plugin_mode": "plugin",
+      "host_tags": [],
+      "host_flags": ["-trimpath"],
+      "plugin_flags": ["-trimpath", "-buildvcs=false"],
+      "host_ldflags": [],
+      "plugin_ldflags": [],
+      "host_workspace": "off",
+      "plugin_workspace": "generated-server-and-plugin",
+      "plugin_symbol": "Plugins"
+    }
+  },
+  "release": {
+    "state": "ready",
+    "sdk_image": "rulego-plugin-sdk",
+    "runtime_image": "rulego-server",
+    "runtime_tag_suffix": "-plugin",
+    "manifest_path": "/usr/share/rulego/plugin-abi.json",
+    "ci": {"runners": {"amd64": "ubuntu-24.04", "arm64": "ubuntu-24.04-arm"}},
+    "editor_payload": {
+      "repository": "https://github.com/rulego/rulego",
+      "version": "v0.37.0",
+      "asset": {
+        "name": "rulego-server-linux-amd64.tar.gz",
+        "sha256": "c541c800632cb7d9476d3b263c6c39ba6f385e9fbc182dca253bf275fa24f501"
+      }
+    },
+    "size_limits": {
+      "amd64": {
+        "sdk": {"compressed": 1500000000, "uncompressed": 3800000000},
+        "runtime": {"compressed": 35000000, "uncompressed": 80000000}
+      },
+      "arm64": {
+        "sdk": {"compressed": 1500000000, "uncompressed": 3800000000},
+        "runtime": {"compressed": 35000000, "uncompressed": 90000000}
+      }
+    }
+  }
+}
