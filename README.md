@@ -1,8 +1,10 @@
 # RuleGo Server container images
 
 This repository packages the official, CI-built [RuleGo](https://github.com/rulego/rulego)
-server release binaries as small, non-root multi-platform container images. It
-does not rebuild RuleGo from source.
+server release binaries as small, non-root multi-platform container images.
+Those standard and all-components images never rebuild RuleGo from source. A
+separate Plugin ABI stream builds a lock-pinned, plugin-capable host and SDK;
+it never feeds its source-built bytes into the standard or all tags.
 
 ## Usage
 
@@ -28,6 +30,73 @@ The image runs as UID/GID `65532:65532`, exposes TCP port 9090, uses
 `/app/config.conf` by default, and writes persistent rules and logs beneath
 `/app/data`. Mount that directory as a volume. Both `linux/amd64` and
 `linux/arm64` are published in every image index.
+
+## Plugin ABI images
+
+[`plugin-abi.lock`](plugin-abi.lock) is the host distributor's single machine
+authority for the Plugin ABI. It owns the exact Go and native toolchains,
+Linux targets, glibc floor, RuleGo Server and Core revisions, module graph,
+build inputs, image names, and release policy. The current
+contract uses Go 1.25.0, `CGO_ENABLED=1`, glibc 2.34 or newer, RuleGo Server
+release `v0.37.0` at source revision
+`a7be24c4c1f649d422b41eb623d1d6e314b20c58`, and RuleGo Core
+`v0.36.1-0.20260802040353-2ec085f29027`. The source revision is the commit
+peeled from that formal release tag; the ABI ID additionally identifies the
+complete build contract, while an OCI digest identifies the resulting image.
+
+The ownership chain is:
+
+```text
+host distributor -> plugin-abi.lock -> SDK image digest -> plugin .so + ABI sidecar
+                                  \-> runtime image digest -> loads the external .so
+```
+
+The SDK discovery tag is `rulego-plugin-sdk:<abi_id>`. The plugin-capable
+server is the `plugin` variant of the formal host release and uses
+`rulego-server:v0.37.0-plugin`. Consumers execute the OCI digests recorded in
+the workflow's `plugin-abi-release.json`; canonical tags are first-writer
+immutable and there is no moving `latest-plugin` alias.
+
+Given a reviewed release record downloaded from the matching workflow run, the
+minimal build is:
+
+```bash
+SDK_REF=$(jq -er '.sdk | select(test("@sha256:[0-9a-f]{64}$"))' plugin-abi-release.json)
+RUNTIME_REF=$(jq -er '.runtime | select(test("@sha256:[0-9a-f]{64}$"))' plugin-abi-release.json)
+ABI_ID=$(jq -er '.abi_id' plugin-abi-release.json)
+LOCK_DIGEST=$(jq -er '.lock_digest' plugin-abi-release.json)
+
+install -d -m 0777 dist
+docker run --rm --platform linux/amd64 \
+  -v "$PWD:/workspace:ro" -v "$PWD/dist:/output" \
+  "$SDK_REF" ./plugin /output/plugin.so
+PLUGIN_SHA256=$(sha256sum dist/plugin.so | awk '{print $1}')
+jq -e --arg abi "$ABI_ID" --arg lock "$LOCK_DIGEST" --arg sha "$PLUGIN_SHA256" \
+  '.abi_id == $abi and .platform == "linux/amd64" and
+   .lock_digest == $lock and .plugin_sha256 == $sha' dist/plugin.so.abi.json
+```
+
+Install only a sidecar-verified plugin in the runtime's persisted data path:
+
+```bash
+mkdir -p data/plugins
+cp dist/plugin.so data/plugins/
+docker run --rm --platform linux/amd64 -p 9090:9090 \
+  -v "$PWD/data:/app/data" \
+  "$RUNTIME_REF"
+```
+
+The complete canonical lock is available in both images at
+`/usr/share/rulego/plugin-abi.json`. OCI index annotations expose the ordered
+platform set and common ABI fields; each child config labels only its own
+platform. Plugin repositories may add plugin-only modules, but must explicitly
+align shared dependencies with the manifest; the SDK rejects mismatched host
+module identities and never edits the plugin checkout. Plugins are installed
+externally under `/app/data/plugins`; no business plugin is bundled in the
+runtime image.
+The digest-pinned SDK compiles the host and exports a root filesystem. The
+runtime recipe copies only that root filesystem into the pinned distroless
+base, so SDK layers and build tools never enter the runtime image.
 
 ## Tags and upstream assets
 
@@ -91,6 +160,25 @@ the built-in `GITHUB_TOKEN`, and needs only `contents: read` and
 are pinned to reviewed commit SHAs; their release versions are recorded beside
 each use.
 
+The independent [Plugin ABI verification workflow](.github/workflows/plugin-abi.yml)
+calls one repository command on each native amd64 and arm64 runner. That
+command uses a job-local registry, consumes the SDK by digest, exports the
+matching host rootfs, builds the runtime, loads a host-owned ABI probe, proves
+wrong-architecture, wrong-ABI, and missing-libc failures, and records image
+sizes. Business-plugin repositories consume the SDK digest and own their
+artifact compatibility checks. Ordinary push and pull-request runs neither
+request package-write permission nor move images between jobs.
+
+The lock is release-ready only after a maintainer reviews a successful
+candidate size report, records positive ceilings, and reruns the full matrix.
+External publication uses the separate
+[Plugin ABI publication workflow](.github/workflows/plugin-abi-publish.yml).
+It requires an explicit `publish=true` manual dispatch and approval of the
+`plugin-abi-release` environment. Native jobs stage their verified images with
+commit-qualified tags; the release job creates two-platform indexes without
+rebuilding, enforces first-writer immutable canonical tags, and verifies the
+returned GHCR digests before producing its release record.
+
 ## Maintenance checks
 
 The preparation script requires Bash, curl, jq, Python 3, tar, and GNU
@@ -108,7 +196,10 @@ Run the local static and failure-injection gates with:
 bash -n scripts/*.sh tests/*.sh
 shellcheck scripts/*.sh tests/*.sh
 actionlint .github/workflows/publish.yml
+actionlint .github/workflows/plugin-abi.yml
+actionlint .github/workflows/plugin-abi-publish.yml
 tests/run.sh
+scripts/plugin-abi.sh validate --candidate
 ```
 
 The publishing workflow configures QEMU and Buildx, runs
