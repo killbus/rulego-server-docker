@@ -23,7 +23,9 @@ EOF
 }
 
 canonical_abi() {
-  jq -S -c '.abi' "${lock}"
+  # tr -d '\r' makes the canonical bytes platform-stable: jq -c on non-LF
+  # platforms appends a CR that would otherwise change the derived abi_id.
+  jq -S -c '.abi' "${lock}" | tr -d '\r'
 }
 
 calculated_abi_id() {
@@ -31,7 +33,7 @@ calculated_abi_id() {
 }
 
 canonical_manifest() {
-  jq -S -c . "${lock}"
+  jq -S -c . "${lock}" | tr -d '\r'
 }
 
 lock_digest() {
@@ -236,7 +238,10 @@ render_sdk_env() {
       ["PLUGIN_LDFLAGS", (.build.plugin_ldflags | join(" "))],
       ["PLUGIN_WORKSPACE", .build.plugin_workspace]
     ][] | @tsv
-  ' <<<"${build_json}")
+  # tr -d '\r' keeps emitted values identical to the CI (LF) output: the Windows
+  # jq build ends every line with CR, and read would otherwise fold that CR into
+  # $value, where printf %q escapes it into a literal CR in the env file.
+  ' <<<"${build_json}" | tr -d '\r')
 }
 
 render_metadata() {
