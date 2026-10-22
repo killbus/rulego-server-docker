@@ -32,7 +32,10 @@ jq \
     .abi.module_graph.list_sha256 = $list |
     .abi.module_graph.graph_sha256 = $graph
   ' plugin-abi.lock >"${test_root}/lock-with-stale-id.json"
-new_id="abi-$(jq -S -c '.abi' "${test_root}/lock-with-stale-id.json" | sha256sum | awk '{print $1}')"
+# Match scripts/plugin-abi.sh canonicalization: the Windows jq build appends a
+# carriage return per output line, which would make this fixture derive a
+# different abi_id than the validator expects. No-op on the CI (LF) emitter.
+new_id="abi-$(jq -S -c '.abi' "${test_root}/lock-with-stale-id.json" | tr -d '\r' | sha256sum | awk '{print $1}')"
 jq --arg id "${new_id}" '.abi_id = $id' "${test_root}/lock-with-stale-id.json" >"${test_root}/lock.json"
 
 cat >"${test_root}/bin/git" <<'EOF'
