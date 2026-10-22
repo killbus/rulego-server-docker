@@ -65,7 +65,7 @@
     }
   },
   "release": {
-    "state": "measurement",
+    "state": "ready",
     "sdk_image": "rulego-plugin-sdk",
     "runtime_image": "rulego-server",
     "runtime_tag_suffix": "-plugin",
@@ -81,12 +81,12 @@
     },
     "size_limits": {
       "amd64": {
-        "sdk": {"compressed": null, "uncompressed": null},
-        "runtime": {"compressed": null, "uncompressed": null}
+        "sdk": {"compressed": 1500000000, "uncompressed": 3800000000},
+        "runtime": {"compressed": 35000000, "uncompressed": 80000000}
       },
       "arm64": {
-        "sdk": {"compressed": null, "uncompressed": null},
-        "runtime": {"compressed": null, "uncompressed": null}
+        "sdk": {"compressed": 1500000000, "uncompressed": 3800000000},
+        "runtime": {"compressed": 35000000, "uncompressed": 90000000}
       }
     }
   }
