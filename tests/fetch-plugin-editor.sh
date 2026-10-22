@@ -26,11 +26,11 @@ for argument in "$@"; do
   previous=${argument}
 done
 url=${*: -1}
-if [[ ${url} == */releases/tags/v0.37.0 ]]; then
-  jq -n --arg sha "${MOCK_ARCHIVE_SHA}" '{tag_name:"v0.37.0",draft:false,prerelease:false,assets:[{
+if [[ ${url} == */releases/tags/v1.0.0 ]]; then
+  jq -n --arg sha "${MOCK_ARCHIVE_SHA}" '{tag_name:"v1.0.0",draft:false,prerelease:false,assets:[{
     name:"rulego-server-linux-amd64.tar.gz",
     digest:("sha256:" + $sha),
-    browser_download_url:"https://github.com/rulego/rulego/releases/download/v0.37.0/rulego-server-linux-amd64.tar.gz"
+    browser_download_url:"https://github.com/rulego/rulego/releases/download/v1.0.0/rulego-server-linux-amd64.tar.gz"
   }]}' >"${output}"
 else
   cp -- "${MOCK_ARCHIVE}" "${output}"

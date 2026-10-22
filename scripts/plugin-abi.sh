@@ -94,7 +94,8 @@ validate_lock() {
     (.abi.rulego_core | exact_keys(["module", "version", "revision"])) and
     (.abi.rulego_core.module | nonempty) and (.abi.rulego_core.version | nonempty) and
     (.abi.rulego_core.revision | revision) and
-    ($root.abi.rulego_core.version | endswith($root.abi.rulego_core.revision[0:12])) and
+    ((.abi.rulego_core.version | test("^v[0-9]+\\.[0-9]+\\.[0-9]+$")) or
+     (.abi.rulego_core.version | endswith($root.abi.rulego_core.revision[0:12]))) and
     (.abi.module_graph | exact_keys(["list_sha256", "graph_sha256", "replacements"])) and
     (.abi.module_graph.list_sha256 | sha256) and (.abi.module_graph.graph_sha256 | sha256) and
     .abi.module_graph.replacements == [] and
@@ -240,7 +241,7 @@ render_sdk_env() {
     ][] | @tsv
   # tr -d '\r' keeps emitted values identical to the CI (LF) output: the Windows
   # jq build ends every line with CR, and read would otherwise fold that CR into
-  # $value, where printf %q escapes it into a literal CR in the env file.
+  # $value, where printf %q escapes it into a literal "\r" in the env file.
   ' <<<"${build_json}" | tr -d '\r')
 }
 
