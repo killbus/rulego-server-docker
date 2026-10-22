@@ -11,10 +11,10 @@ it never feeds its source-built bytes into the standard or all tags.
 Pull a versioned standard image:
 
 ```bash
-docker pull ghcr.io/killbus/rulego-server:v0.37.0
+docker pull ghcr.io/killbus/rulego-server:v1.0.0
 docker run --rm -p 9090:9090 \
   -v rulego-data:/app/data \
-  ghcr.io/killbus/rulego-server:v0.37.0
+  ghcr.io/killbus/rulego-server:v1.0.0
 ```
 
 Open <http://localhost:9090/editor/> after the server starts. Use the
@@ -23,7 +23,7 @@ all-components variant when its additional RuleGo components are required:
 ```bash
 docker run --rm -p 9090:9090 \
   -v rulego-data:/app/data \
-  ghcr.io/killbus/rulego-server:v0.37.0-all
+  ghcr.io/killbus/rulego-server:v1.0.0-all
 ```
 
 The image runs as UID/GID `65532:65532`, exposes TCP port 9090, uses
@@ -38,9 +38,9 @@ authority for the Plugin ABI. It owns the exact Go and native toolchains,
 Linux targets, glibc floor, RuleGo Server and Core revisions, module graph,
 build inputs, image names, and release policy. The current
 contract uses Go 1.25.0, `CGO_ENABLED=1`, glibc 2.34 or newer, RuleGo Server
-release `v0.37.0` at source revision
-`a7be24c4c1f649d422b41eb623d1d6e314b20c58`, and RuleGo Core
-`v0.36.1-0.20260802040353-2ec085f29027`. The source revision is the commit
+release `v1.0.0` at source revision
+`45d1a6c4e1af594d7319dd11df9fa58bd48fd0e0`, and RuleGo Core
+`v1.0.0`. The source revision is the commit
 peeled from that formal release tag; the ABI ID additionally identifies the
 complete build contract, while an OCI digest identifies the resulting image.
 
@@ -53,7 +53,7 @@ host distributor -> plugin-abi.lock -> SDK image digest -> plugin .so + ABI side
 
 The SDK discovery tag is `rulego-plugin-sdk:<abi_id>`. The plugin-capable
 server is the `plugin` variant of the formal host release and uses
-`rulego-server:v0.37.0-plugin`. Consumers execute the OCI digests recorded in
+`rulego-server:v1.0.0-plugin`. Consumers execute the OCI digests recorded in
 the workflow's `plugin-abi-release.json`; canonical tags are first-writer
 immutable and there is no moving `latest-plugin` alias.
 
@@ -186,8 +186,8 @@ coreutils. To validate both sets of upstream payloads without building or
 starting containers:
 
 ```bash
-scripts/fetch-release.sh v0.37.0 standard
-scripts/fetch-release.sh v0.37.0 all
+scripts/fetch-release.sh v1.0.0 standard
+scripts/fetch-release.sh v1.0.0 all
 ```
 
 Run the local static and failure-injection gates with:

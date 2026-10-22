@@ -26,20 +26,20 @@ jq -e '.include | map(.platform) == ["linux/amd64", "linux/arm64"]' \
   <<<"$(scripts/plugin-abi.sh render matrix)" >/dev/null
 jq -e '."io.rulego.abi.platforms" == "linux/amd64,linux/arm64" and has("io.rulego.abi.platform") == false' \
   <<<"$(scripts/plugin-abi.sh render metadata plugin-sdk)" >/dev/null
-jq -e '."io.rulego.abi.platform" == "linux/arm64" and ."io.rulego.server.release" == "v0.37.0" and
-  ."org.opencontainers.image.version" == "v0.37.0-plugin" and has("io.rulego.abi.platforms") == false' \
+jq -e '."io.rulego.abi.platform" == "linux/arm64" and ."io.rulego.server.release" == "v1.0.0" and
+  ."org.opencontainers.image.version" == "v1.0.0-plugin" and has("io.rulego.abi.platforms") == false' \
   <<<"$(scripts/plugin-abi.sh render metadata plugin-runtime arm64)" >/dev/null
 grep -Fxq 'LINKER_COMMAND=ld' <(scripts/plugin-abi.sh render sdk-env amd64)
 grep -Fxq 'LINKER_IDENTITY=GNU\ ld' <(scripts/plugin-abi.sh render sdk-env amd64)
 grep -Fxq 'GOFLAGS=-mod=readonly' <(scripts/plugin-abi.sh render sdk-env amd64)
 grep -Fxq 'PLUGIN_FLAGS=-trimpath\ -buildvcs=false' <(scripts/plugin-abi.sh render sdk-env amd64)
-jq -e '.version == "v0.37.0" and .asset.name == "rulego-server-linux-amd64.tar.gz"' \
+jq -e '.version == "v1.0.0" and .asset.name == "rulego-server-linux-amd64.tar.gz"' \
   <<<"$(scripts/plugin-abi.sh render editor)" >/dev/null
 jq -e '.runtime_image == "rulego-server" and .runtime_tag_suffix == "-plugin"' \
   <<<"$(scripts/plugin-abi.sh render ci)" >/dev/null
-jq -e '.rulego_server.release_version == "v0.37.0" and
-  .rulego_server.revision == "a7be24c4c1f649d422b41eb623d1d6e314b20c58" and
-  .rulego_core.version == "v0.36.1-0.20260802040353-2ec085f29027"' \
+jq -e '.rulego_server.release_version == "v1.0.0" and
+  .rulego_server.revision == "45d1a6c4e1af594d7319dd11df9fa58bd48fd0e0" and
+  .rulego_core.version == "v1.0.0"' \
   <<<"$(scripts/plugin-abi.sh render build amd64)" >/dev/null
 
 mutate_and_fail() {
@@ -62,6 +62,10 @@ mutate_and_fail 'missing linker command' 'del(.abi.native.toolchains[0].linker_c
 mutate_and_fail 'compiler identity mismatch' '.abi.native.toolchains[0].cc = "clang"'
 mutate_and_fail 'mutable editor source' '.release.editor_payload.asset.sha256 = "latest"'
 mutate_and_fail 'editor release differs from host release' '.release.editor_payload.version = "v0.36.0"'
+# The core version is either a formal release tag or a pseudo-version that
+# carries the pinned revision prefix; anything else must not validate.
+mutate_and_fail 'core version is neither a tag nor revision-prefixed' \
+  '.abi.rulego_core.version = "v1.0.0-rc1"'
 
 measurement=${test_root}/measurement.json
 jq '.release.state = "measurement" | .release.size_limits[][][] = null' plugin-abi.lock >"${measurement}"
@@ -76,7 +80,7 @@ PLUGIN_ABI_LOCK=${ready} scripts/plugin-abi.sh validate --release
 tags=$(PLUGIN_ABI_LOCK=${ready} scripts/plugin-abi.sh render tags)
 jq -e --arg abi_id "${abi_id}" '
   .sdk == ("rulego-plugin-sdk:" + $abi_id) and
-  .runtime == "rulego-server:v0.37.0-plugin"
+  .runtime == "rulego-server:v1.0.0-plugin"
 ' <<<"${tags}" >/dev/null
 
 echo 'Plugin ABI lock validation and rendering passed'

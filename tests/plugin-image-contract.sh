@@ -93,7 +93,7 @@ if grep -Fq 'FROM ${SDK_BASE}' Dockerfile || grep -Fq 'plugin-runtime' Dockerfil
   echo 'standard/all Dockerfile was coupled to the Plugin ABI stream' >&2
   exit 1
 fi
-assert_contains README.md 'rulego-server:v0.37.0-plugin'
+assert_contains README.md 'rulego-server:v1.0.0-plugin'
 if grep -R -Fq 'latest-plugin' -- Dockerfile.plugin-* scripts .github 2>/dev/null; then
   echo 'Plugin ABI stream must not define a mutable latest alias' >&2
   exit 1
