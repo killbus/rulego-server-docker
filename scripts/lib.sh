@@ -380,6 +380,39 @@ publish_immutable_image_tag() {
   printf '%s@%s\n' "${target%:*}" "${existing}"
 }
 
+# Probes every canonical target before any tag is written so one authorized
+# release either publishes all of its tags or none of them. A runtime canonical
+# tag is named after the host release alone, but its index annotations carry
+# both the ABI identity and the packaging revision, so only the exact build
+# that first claimed a release version can reproduce it. Any later ABI
+# re-sign, and any rebuild from another commit, conflicts.
+# Each plan line is <canonical-target>\t<digest-addressed-source>\t<identity>.
+require_immutable_tags_publishable() {
+  local plan=${1:?canonical tag plan is required}
+  [[ -f ${plan} ]] || die "canonical tag plan not found: ${plan}"
+
+  local target source expected existing status identity conflicts=()
+  while IFS=$'\t' read -r target source identity; do
+    [[ -n ${target} && -n ${source} && -n ${identity} ]] ||
+      die "invalid canonical tag plan line for ${plan}"
+    expected=${source##*@}
+    [[ ${source} =~ @sha256:[0-9a-f]{64}$ ]] ||
+      die "source image must be addressed by digest: ${source}"
+    if existing=$(image_reference_digest "${target}"); then
+      [[ ${existing} == "${expected}" ]] ||
+        conflicts+=("${identity}: ${target} holds ${existing}, this release needs ${expected}")
+    else
+      status=$?
+      ((status == 1)) || die "canonical tag cannot be inspected: ${target}"
+    fi
+  done <"${plan}"
+
+  (( ${#conflicts[@]} == 0 )) ||
+    die "no tag written; canonical tags already published for a different build: $(
+      printf '%s; ' "${conflicts[@]}"
+    ) advance abi.rulego_server.release_version before publishing this build"
+}
+
 retry_command() {
   local attempts=${1:?attempt count is required}
   local delay=${2:?initial delay is required}

@@ -86,4 +86,45 @@ if verify_exact_image_children test@index "${expected}" "${other}" "${test_root}
   exit 1
 fi
 
+canonical_plan=${test_root}/canonical-plan.tsv
+printf '%s\t%s\t%s\n%s\t%s\t%s\n' \
+  registry.example:5000/rulego-plugin-sdk:abi-test "${source_ref}" plugin-sdk \
+  "${target}" "registry.example:5000/rulego-server@${expected}" runtime-plugin >"${canonical_plan}"
+
+# All canonical tags absent: the plan is publishable and nothing is written.
+MOCK_TAG_STATE=absent
+require_immutable_tags_publishable "${canonical_plan}"
+[[ ! -e ${docker_log} ]]
+
+# One existing tag already points elsewhere: fail before any write, naming both
+# the conflicting identity and the revision that owns the tag.
+MOCK_TAG_STATE=mismatched
+rm -f -- "${state}" "${docker_log}"
+if (require_immutable_tags_publishable "${canonical_plan}") >"${test_root}/stdout" 2>"${test_root}/stderr"; then
+  echo 'expected canonical tag conflict before publication' >&2
+  exit 1
+fi
+[[ ! -e ${docker_log} ]]
+grep -Fq 'no tag written' "${test_root}/stderr"
+grep -Fq 'runtime-plugin' "${test_root}/stderr"
+
+# An unpublished canonical tag whose sibling holds this release's digest stays
+# publishable, so a rerun of the revision that first published it succeeds.
+MOCK_TAG_STATE=matching
+require_immutable_tags_publishable "${canonical_plan}"
+[[ ! -e ${docker_log} ]]
+
+# A registry that cannot answer is not treated as absent.
+MOCK_TAG_STATE=error
+if (require_immutable_tags_publishable "${canonical_plan}") 2>"${test_root}/stderr"; then
+  echo 'expected canonical tag inspection failure' >&2
+  exit 1
+fi
+[[ ! -e ${docker_log} ]]
+
+if (require_immutable_tags_publishable "${test_root}/missing-plan.tsv") 2>/dev/null; then
+  echo 'expected missing canonical tag plan failure' >&2
+  exit 1
+fi
+
 echo 'Plugin publication immutability and platform policy passed'

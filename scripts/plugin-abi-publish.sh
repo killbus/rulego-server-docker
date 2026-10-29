@@ -162,6 +162,17 @@ PLUGIN_ABI_PACKAGING_SOURCE=${source_url} \
 PLUGIN_ABI_PACKAGING_REVISION=${packaging_revision} \
   "${script_dir}/verify-plugin-oci.sh" "${sdk_staging_index}" "${runtime_staging_indexes}" release
 
+# Every canonical tag is probed before the first write so a conflicting tag
+# cannot leave a partially published release behind.
+canonical_plan=${TMPDIR}/canonical-tags.tsv
+: >"${canonical_plan}"
+printf '%s\t%s\t%s\n' "${sdk_canonical}" "${sdk_staging_index}" plugin-sdk >>"${canonical_plan}"
+while IFS=$'\t' read -r host_id runtime_index; do
+  runtime_name=$(jq -er --arg host_id "${host_id}" '.runtime[$host_id]' <<<"${tags}")
+  printf '%s\t%s\t%s\n' "${runtime_repository}:${runtime_name#*:}" "${runtime_index}" "runtime-${host_id}" >>"${canonical_plan}"
+done < <(jq -r 'to_entries[] | [.key, .value] | @tsv' <<<"${runtime_staging_indexes}")
+require_immutable_tags_publishable "${canonical_plan}"
+
 sdk_ref=$(publish_immutable_image_tag "${sdk_canonical}" "${sdk_staging_index}")
 runtime_refs='{}'
 while IFS= read -r host_id; do
