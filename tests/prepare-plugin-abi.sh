@@ -137,6 +137,12 @@ cmp -s "${test_root}/source/server/go.sum" "${output}/source/server/go.sum"
 [[ -f ${output}/manifest/host-modules.tsv ]]
 [[ -f ${output}/runtime/editor/index.html ]]
 [[ -x ${output}/rulego-plugin-build && -x ${output}/build-plugin-host ]]
+grep -Fxq 'HOST_ID=plugin' "${output}/manifest/build.env"
+grep -Fxq "HOST_TAGS=''" "${output}/manifest/build.env"
+jq -e '.abi.build.hosts == [
+  {"id":"plugin","tags":[],"tag_suffix":"-plugin"},
+  {"id":"ai-plugin","tags":["with_ai"],"tag_suffix":"-ai-plugin"}
+]' "${output}/manifest/plugin-abi.json" >/dev/null
 cmp -s "${test_root}/module-list.txt" "${output}/manifest/module-list.txt"
 grep -Fqx $'github.com/rulego/rulego\t'"${core_version}"$'\tfalse\t\t\th1:module\th1:gomod' \
   "${output}/manifest/host-modules.tsv"

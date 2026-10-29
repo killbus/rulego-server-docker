@@ -7,6 +7,7 @@ build_environment=${RULEGO_BUILD_ENV:-/opt/rulego/build.env}
 manifest=${RULEGO_ABI_MANIFEST:-/abi-manifest.json}
 output_root=${RULEGO_OUTPUT_ROOT:-/out/rootfs}
 editor_source=${RULEGO_EDITOR_SOURCE:-/opt/rulego/editor}
+requested_host=${RULEGO_HOST_ID:-plugin}
 
 die() {
   printf 'error: %s\n' "$*" >&2
@@ -18,6 +19,18 @@ die() {
 source "${build_environment}"
 
 [[ "sha256:$(sha256sum "${manifest}" | awk '{print $1}')" == "${LOCK_DIGEST}" ]] || die 'Plugin ABI manifest digest mismatch'
+host_found=false
+IFS=';' read -r -a host_variants <<<"${HOST_VARIANTS}"
+for host_variant in "${host_variants[@]}"; do
+  host_id=${host_variant%%=*}
+  host_tags=${host_variant#*=}
+  if [[ ${host_id} == "${requested_host}" ]]; then
+    HOST_TAGS=${host_tags}
+    host_found=true
+    break
+  fi
+done
+[[ ${host_found} == true ]] || die "unknown host variant: ${requested_host}"
 [[ $(GOENV="${GOENV}" GOTOOLCHAIN="${GOTOOLCHAIN}" go env GOVERSION) == "go${GO_VERSION}" ]] || die 'host Go version mismatch'
 [[ $(GOENV="${GOENV}" GOTOOLCHAIN="${GOTOOLCHAIN}" go env GOARCH) == "${GOARCH}" ]] || die 'host architecture mismatch'
 [[ $("${CC}" -dumpfullversion) == "${CC_VERSION}" ]] || die 'host C compiler mismatch'
@@ -56,6 +69,12 @@ grep -Fq "go${GO_VERSION}" "${output_root}/rulego-server.buildinfo" || die 'host
 grep -Fq $'build\tCGO_ENABLED='"${CGO_ENABLED}" "${output_root}/rulego-server.buildinfo" || die 'host metadata has the wrong CGO setting'
 grep -Fq $'build\tGOARCH='"${GOARCH}" "${output_root}/rulego-server.buildinfo" || die 'host metadata has the wrong architecture'
 grep -Fq $'dep\t'"${CORE_MODULE}"$'\t'"${CORE_VERSION}" "${output_root}/rulego-server.buildinfo" || die 'host metadata has the wrong RuleGo Core version'
+if [[ -n ${HOST_TAGS} ]]; then
+  grep -Fq $'build\t-tags='"${HOST_TAGS}" "${output_root}/rulego-server.buildinfo" \
+    || die 'host metadata has the wrong build tags'
+elif grep -Fq $'build\t-tags=' "${output_root}/rulego-server.buildinfo"; then
+  die 'standard host metadata unexpectedly contains build tags'
+fi
 
 cp -- "${source_root}/config.conf" "${source_root}/node_pool.json" "${output_root}/"
 cp -a -- "${editor_source}/." "${output_root}/editor/"

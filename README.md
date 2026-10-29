@@ -51,18 +51,26 @@ host distributor -> plugin-abi.lock -> SDK image digest -> plugin .so + ABI side
                                   \-> runtime image digest -> loads the external .so
 ```
 
-The SDK discovery tag is `rulego-plugin-sdk:<abi_id>`. The plugin-capable
-server is the `plugin` variant of the formal host release and uses
-`rulego-server:v1.0.0-plugin`. Consumers execute the OCI digests recorded in
-the workflow's `plugin-abi-release.json`; canonical tags are first-writer
-immutable and there is no moving `latest-plugin` alias.
+The SDK discovery tag is `rulego-plugin-sdk:<abi_id>`. One SDK serves both
+plugin-capable runtime hosts:
+
+- `rulego-server:v1.0.0-plugin` is the standard host without optional component tags.
+- `rulego-server:v1.0.0-ai-plugin` is built with `with_ai` and includes `ai/agent`.
+
+The same ABI-compatible plugin can be loaded by either runtime. Consumers
+execute the OCI digests recorded in the workflow's `plugin-abi-release.json`;
+canonical tags are first-writer immutable and there are no moving aliases.
+An `-all-plugin` host is reserved for a later release and is not produced by
+this contract.
 
 Given a reviewed release record downloaded from the matching workflow run, the
 minimal build is:
 
 ```bash
 SDK_REF=$(jq -er '.sdk | select(test("@sha256:[0-9a-f]{64}$"))' plugin-abi-release.json)
-RUNTIME_REF=$(jq -er '.runtime | select(test("@sha256:[0-9a-f]{64}$"))' plugin-abi-release.json)
+RUNTIME_HOST=${RUNTIME_HOST:-plugin}
+RUNTIME_REF=$(jq -er --arg host "$RUNTIME_HOST" \
+  '.runtime[$host] | select(test("@sha256:[0-9a-f]{64}$"))' plugin-abi-release.json)
 ABI_ID=$(jq -er '.abi_id' plugin-abi-release.json)
 LOCK_DIGEST=$(jq -er '.lock_digest' plugin-abi-release.json)
 
@@ -163,9 +171,11 @@ each use.
 The independent [Plugin ABI verification workflow](.github/workflows/plugin-abi.yml)
 calls one repository command on each native amd64 and arm64 runner. That
 command uses a job-local registry, consumes the SDK by digest, exports the
-matching host rootfs, builds the runtime, loads a host-owned ABI probe, proves
+matching host rootfs, builds both runtime hosts, verifies their `ai/agent`
+component difference, loads a host-owned ABI probe in each, proves
 wrong-architecture, wrong-ABI, and missing-libc failures, and records image
-sizes. Business-plugin repositories consume the SDK digest and own their
+sizes. The release record stores runtime digests under `.runtime.plugin` and
+`.runtime["ai-plugin"]`. Business-plugin repositories consume the SDK digest and own their
 artifact compatibility checks. Ordinary push and pull-request runs neither
 request package-write permission nor move images between jobs.
 

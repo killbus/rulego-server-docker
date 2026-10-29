@@ -7,13 +7,19 @@ repository_root=$(cd -- "${script_dir}/.." && pwd)
 # shellcheck source=scripts/lib.sh
 source "${script_dir}/lib.sh"
 
-[[ $# == 3 ]] || die 'usage: scripts/verify-plugin-oci.sh <sdk-index@digest> <runtime-index@digest> <candidate|release>'
+[[ $# == 3 ]] || die 'usage: scripts/verify-plugin-oci.sh <sdk-index@digest> <runtime-index-json> <candidate|release>'
 sdk_ref=$1
-runtime_ref=$2
+runtime_refs=$2
 mode=$3
 [[ ${mode} == candidate || ${mode} == release ]] || die 'verification mode must be candidate or release'
 "${script_dir}/plugin-abi.sh" validate "--${mode}"
 require_command docker jq sha256sum
+expected_hosts=$("${script_dir}/plugin-abi.sh" render ci | jq -c '[.hosts[].id] | sort')
+jq -e --argjson expected_hosts "${expected_hosts}" '
+  type == "object" and
+  (keys_unsorted | sort) == $expected_hosts and
+  all(.[]; type == "string" and test("@sha256:[0-9a-f]{64}$"))
+' <<<"${runtime_refs}" >/dev/null || die 'runtime indexes must match the locked host variants'
 
 mkdir -p "${repository_root}/tmp"
 work=$(mktemp -d "${repository_root}/tmp/plugin-oci.XXXXXX")
@@ -26,13 +32,16 @@ canonical_manifest=$("${script_dir}/plugin-abi.sh" render manifest)
 verify_index() {
   local variant=$1
   local ref=$2
-  local index=${work}/${variant}-index.json
+  local host_id=${3:-plugin}
+  local identity=${variant}
+  [[ ${variant} != plugin-runtime ]] || identity=${variant}-${host_id}
+  local index=${work}/${identity}-index.json
   local expected_index repository arch child child_ref compressed uncompressed labels expected_child ceiling container copied
   local attestation
   [[ ${ref} =~ @sha256:[0-9a-f]{64}$ ]] || die "index must be addressed by digest: ${ref}"
   repository=${ref%@*}
   docker buildx imagetools inspect "${ref}" --format '{{json .Manifest}}' >"${index}"
-  expected_index=$("${script_dir}/plugin-abi.sh" render metadata "${variant}")
+  expected_index=$("${script_dir}/plugin-abi.sh" render metadata "${variant}" '' "${host_id}")
   if [[ -n ${PLUGIN_ABI_PACKAGING_SOURCE:-} ]]; then
     expected_index=$(jq -c --arg source "${PLUGIN_ABI_PACKAGING_SOURCE}" '. + {"org.opencontainers.image.source":$source}' <<<"${expected_index}")
   fi
@@ -70,7 +79,7 @@ verify_index() {
     compressed=$(docker buildx imagetools inspect "${child_ref}" --raw | jq -er '[.layers[].size] | add')
     retry_command 4 2 docker pull --platform "linux/${arch}" "${child_ref}" >/dev/null
     uncompressed=$(docker image inspect "${child_ref}" --format '{{.Size}}')
-    expected_child=$("${script_dir}/plugin-abi.sh" render metadata "${variant}" "${arch}")
+    expected_child=$("${script_dir}/plugin-abi.sh" render metadata "${variant}" "${arch}" "${host_id}")
     if [[ -n ${PLUGIN_ABI_PACKAGING_SOURCE:-} ]]; then
       expected_child=$(jq -c --arg source "${PLUGIN_ABI_PACKAGING_SOURCE}" '. + {"org.opencontainers.image.source":$source}' <<<"${expected_child}")
     fi
@@ -85,20 +94,25 @@ verify_index() {
     ' <<<"${labels}" >/dev/null || die "${variant} ${arch} child-label mismatch"
 
     container=$(docker create --platform "linux/${arch}" "${child_ref}")
-    copied=${work}/${variant}-${arch}-manifest.json
+    copied=${work}/${identity}-${arch}-manifest.json
     docker cp "${container}:${manifest_path}" "${copied}"
     docker rm "${container}" >/dev/null
     [[ $(jq -S -c . "${copied}") == "${canonical_manifest}" ]] || die "${variant} ${arch} embedded manifest mismatch"
 
-    ceiling=$("${script_dir}/plugin-abi.sh" render size-limit "${arch}" | jq -ec --arg variant "${variant#plugin-}" '.[$variant]')
+    ceiling=$("${script_dir}/plugin-abi.sh" render size-limit "${arch}" "${host_id}" |
+      jq -ec --arg variant "${variant#plugin-}" '.[$variant]')
     if [[ ${mode} == release ]]; then
       ((compressed <= $(jq -er '.compressed' <<<"${ceiling}"))) || die "${variant} ${arch} compressed size exceeds its ceiling"
       ((uncompressed <= $(jq -er '.uncompressed' <<<"${ceiling}"))) || die "${variant} ${arch} uncompressed size exceeds its ceiling"
     fi
-    printf '%s\t%s\t%s\t%s\n' "${variant}" "${arch}" "${compressed}" "${uncompressed}" >>"${report}"
+    printf '%s\t%s\t%s\t%s\n' \
+      "$(if [[ ${variant} == plugin-runtime ]]; then printf '%s/%s' "${variant}" "${host_id}"; else printf '%s' "${variant}"; fi)" \
+      "${arch}" "${compressed}" "${uncompressed}" >>"${report}"
   done < <("${script_dir}/plugin-abi.sh" render matrix | jq -r '.include[].goarch')
 }
 
 verify_index plugin-sdk "${sdk_ref}"
-verify_index plugin-runtime "${runtime_ref}"
+while IFS=$'\t' read -r host_id runtime_ref; do
+  verify_index plugin-runtime "${runtime_ref}" "${host_id}"
+done < <(jq -r 'to_entries[] | [.key, .value] | @tsv' <<<"${runtime_refs}")
 cat "${report}"

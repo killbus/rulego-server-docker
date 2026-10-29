@@ -34,9 +34,19 @@ assert_contains .dockerignore '!Dockerfile.plugin-runtime'
 
 assert_contains scripts/plugin-abi-build.sh 'SDK_BASE=${sdk_base}'
 assert_contains scripts/plugin-abi-build.sh '"${sdk_ref}" . "/output/sdk-probe-${arch}.so"'
+assert_contains scripts/plugin-abi-build.sh '"${legacy_sdk_ref}" . "/output/legacy-sdk-probe-${arch}.so"'
+assert_contains scripts/plugin-abi-build.sh 'render compatibility-sdk "${arch}"'
+assert_contains scripts/plugin-abi-build.sh "legacy_sdk_ref=\$(jq -er '.reference' <<<\"\${compatibility_json}\")"
+assert_contains scripts/plugin-abi-build.sh 'load "${runtime_ref}" "${arch}" "${work}/sdk-output/legacy-sdk-probe-${arch}.so"'
 assert_contains scripts/plugin-abi-build.sh '--entrypoint /usr/local/bin/build-plugin-host'
 assert_contains scripts/plugin-abi-build.sh 'Dockerfile.plugin-runtime'
-assert_contains scripts/plugin-abi-build.sh 'staging-${packaging_revision}-${arch}${runtime_tag_suffix}'
+assert_contains scripts/plugin-abi-build.sh 'staging-${packaging_revision}-${arch}${tag_suffix}'
+assert_contains scripts/plugin-abi-build.sh '--env "RULEGO_HOST_ID=${host_id}"'
+assert_contains scripts/build-plugin-host 'IFS='"'"';'"'"' read -r -a host_variants <<<"${HOST_VARIANTS}"'
+if grep -Eq '(^|[^[:alnum:]_])jq([^[:alnum:]_]|$)' scripts/build-plugin-host; then
+  echo 'host builder depends on jq, which is absent from compatibility SDK images' >&2
+  exit 1
+fi
 assert_contains scripts/plugin-abi-build.sh 'verify-plugin-runtime.sh" load'
 assert_contains scripts/plugin-abi-build.sh 'verify-plugin-runtime.sh" reject'
 assert_contains scripts/plugin-abi-build.sh 'verify-plugin-runtime.sh" missing-libc'
@@ -55,8 +65,9 @@ fi
 assert_contains scripts/plugin-abi-publish.sh 'publish_immutable_image_tag'
 assert_contains scripts/lib.sh 'immutable tag already points to a different digest'
 assert_contains scripts/plugin-abi-publish.sh 'verify-plugin-oci.sh'
-assert_contains scripts/plugin-abi-publish.sh 'expected_staging=${runtime_repository}:staging-${packaging_revision}-${arch}${runtime_tag_suffix}'
-assert_contains scripts/verify-plugin-oci.sh '--arg variant "${variant#plugin-}"'
+assert_contains scripts/plugin-abi-publish.sh 'expected_staging=${runtime_repository}:staging-${packaging_revision}-${arch}${tag_suffix}'
+assert_contains scripts/plugin-abi-publish.sh 'runtime_staging_indexes='
+assert_contains scripts/verify-plugin-oci.sh 'render size-limit "${arch}" "${host_id}"'
 assert_contains scripts/plugin-abi-build.sh 'dd of="${work}/wrong-arch.so"'
 assert_contains scripts/plugin-abi-build.sh '-gcflags=all=-N'
 
