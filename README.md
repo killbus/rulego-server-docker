@@ -217,7 +217,9 @@ GitHub-hosted runner, pushes architecture images by digest, and then assembles
 the version and moving tags as a two-platform OCI index. It runs
 `scripts/verify-build.sh` before publication and `scripts/verify-published.sh`
 afterward. These CI-only gates perform native non-root HTTP smoke tests,
-runtime-content checks, manifest checks, and executable digest comparisons.
+runtime-content checks, manifest checks, executable digest comparisons, and
+pair every architecture in the assembled index with its SLSA provenance and SBOM
+attestations.
 
 Transient API, registry, and download failures—including disconnected streams,
 HTTP 429/5xx responses, and GitHub rate-limit responses—are retried with

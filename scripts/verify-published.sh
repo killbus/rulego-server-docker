@@ -15,6 +15,11 @@ fi
 image_reference=$1
 require_command docker jq sha256sum
 
+image_repository=${image_reference%%@*}
+if [[ ${image_repository##*/} == *:* ]]; then
+  image_repository=${image_repository%:*}
+fi
+
 build_dir=${repository_root}/build
 [[ -f ${build_dir}/version ]] || die 'build/version is missing; run fetch-release.sh first'
 
@@ -37,6 +42,60 @@ else
   fi
   die "could not inspect published image after bounded retries: ${image_reference}"
 fi
+
+index_manifest=${verification_dir}/index.json
+retry_command 5 3 docker buildx imagetools inspect "${image_reference}" \
+  --format '{{json .Manifest}}' >"${index_manifest}"
+# Every native image pushed with provenance and SBOM contributes one attestation
+# manifest, so the assembled index must pair both platforms with attestation.
+jq -e '
+  (.manifests | map(select(.platform.os == "linux"))) as $images |
+  (.manifests | map(select(.platform.os == "unknown" and .platform.architecture == "unknown"
+    and .annotations["vnd.docker.reference.type"] == "attestation-manifest"))) as $attestations |
+  (.manifests | length) == ($images | length + ($attestations | length)) and
+  ([$images[] | select(.platform.architecture == "amd64")] | length == 1) and
+  ([$images[] | select(.platform.architecture == "arm64")] | length == 1) and
+  ($attestations | length >= 2) and
+  ($images | all(.digest as $digest
+    | $attestations | any(.annotations["vnd.docker.reference.digest"] == $digest))) and
+  ($attestations | all(.annotations["vnd.docker.reference.digest"] as $digest
+    | $images | any(.digest == $digest)))
+' "${index_manifest}" >/dev/null \
+  || die "published image index is missing its attestation manifests: ${image_reference}"
+
+verify_attestation_predicates() {
+  local architecture=$1
+  local image_digest predicates attestation
+  image_digest=$(jq -er --arg arch "${architecture}" '
+    .manifests[]
+    | select(.platform.os == "linux" and .platform.architecture == $arch)
+    | .digest
+  ' "${index_manifest}")
+
+  predicates=
+  while IFS= read -r attestation; do
+    [[ -n ${attestation} ]] || continue
+    predicates+=$(retry_command 5 3 docker buildx imagetools inspect \
+      "${image_repository}@${attestation}" --raw \
+      | jq -r '[.layers[]?.annotations["in-toto.io/predicate-type"]] | .[]')
+    predicates+=$'\n'
+  done < <(jq -r --arg digest "${image_digest}" '
+    .manifests[]
+    | select(.platform.os == "unknown"
+      and .annotations["vnd.docker.reference.type"] == "attestation-manifest"
+      and .annotations["vnd.docker.reference.digest"] == $digest)
+    | .digest
+  ' "${index_manifest}")
+
+  grep -q 'slsa.dev/provenance' <<<"${predicates}" \
+    || die "published image has no SLSA provenance attestation for ${architecture}: ${image_reference}"
+  grep -q 'spdx.dev/Document' <<<"${predicates}" \
+    || die "published image has no SBOM attestation for ${architecture}: ${image_reference}"
+  log "Verified SLSA provenance and SBOM attestations for ${architecture} of ${image_reference}"
+}
+
+verify_attestation_predicates amd64
+verify_attestation_predicates arm64
 
 for architecture in amd64 arm64; do
   expected_file=${build_dir}/${architecture}/rulego-server.sha256
