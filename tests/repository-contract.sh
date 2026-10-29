@@ -67,10 +67,14 @@ assert_contains "${workflow}" 'if [[ $moving_digest != "$version_digest" ]]; the
 assert_contains "${workflow}" 'provenance: mode=max'
 assert_contains "${workflow}" 'sbom: true'
 assert_contains "${workflow}" "uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"
-if grep -Fq 'docker/setup-qemu-action' "${workflow}"; then
-  echo 'publish workflow must use native architecture runners instead of QEMU' >&2
-  exit 1
-fi
+# Every workflow either builds on native architecture runners or inspects
+# foreign-platform children without executing them, so QEMU must never appear.
+for qemu_workflow in .github/workflows/*.yml; do
+  if grep -Fq 'docker/setup-qemu-action' "${qemu_workflow}"; then
+    printf '%s must use native architecture runners instead of QEMU\n' "${qemu_workflow}" >&2
+    exit 1
+  fi
+done
 assert_contains "${workflow}" "uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e"
 assert_contains "${workflow}" "uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f"
 assert_contains "${workflow}" "uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302"
