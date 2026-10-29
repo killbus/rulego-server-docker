@@ -8,6 +8,11 @@ on:
         required: true
         default: false
         type: boolean
+      staging_only:
+        description: Build and stage commit-qualified images only, publishing no immutable ABI tag
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -18,7 +23,6 @@ concurrency:
 
 jobs:
   contract:
-    if: ${{ inputs.publish }}
     name: Validate release contract
     runs-on: ubuntu-24.04
     timeout-minutes: 10
@@ -32,8 +36,21 @@ jobs:
           persist-credentials: false
       - name: Render native matrix
         id: contract
+        env:
+          REQUESTED_PUBLISH: ${{ github.event.inputs.publish }}
+          REQUESTED_STAGING_ONLY: ${{ github.event.inputs.staging_only }}
         run: |
-          scripts/plugin-abi.sh validate --release
+          # A dispatch with both flags false would skip every downstream job and
+          # report success without exercising the pipeline, so it is rejected.
+          if [[ $REQUESTED_PUBLISH != true && $REQUESTED_STAGING_ONLY != true ]]; then
+            echo 'dispatch requires publish=true or staging_only=true' >&2
+            exit 1
+          fi
+          if [[ $REQUESTED_PUBLISH == true ]]; then
+            scripts/plugin-abi.sh validate --release
+          else
+            scripts/plugin-abi.sh validate --candidate
+          fi
           echo "matrix=$(scripts/plugin-abi.sh render matrix)" >>"$GITHUB_OUTPUT"
 
   native:
@@ -73,7 +90,8 @@ jobs:
       - name: Build, verify, and stage native artifacts
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          PLUGIN_ABI_PUBLISH: "true"
+          PLUGIN_ABI_STAGE: "true"
+          PLUGIN_ABI_PUBLISH: ${{ github.event.inputs.publish }}
         run: scripts/plugin-abi-build.sh "${{ matrix.goarch }}"
       - name: Upload native evidence
         # actions/upload-artifact v4
@@ -85,6 +103,7 @@ jobs:
 
   publish:
     name: Publish immutable indexes
+    if: ${{ inputs.publish }}
     needs: [contract, native]
     runs-on: ubuntu-24.04
     timeout-minutes: 90

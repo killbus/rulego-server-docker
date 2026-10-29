@@ -21,8 +21,14 @@ manifest_path=$(jq -er '.manifest_path' <<<"${build_json}")
 abi_id=$(jq -er '.abi_id' <<<"${build_json}")
 lock_digest=$(jq -er '.lock_digest' <<<"${build_json}")
 libc_minimum=$(jq -er '.native.minimum_version' <<<"${build_json}")
+stage=${PLUGIN_ABI_STAGE:-false}
 publish=${PLUGIN_ABI_PUBLISH:-false}
+[[ ${stage} == true || ${stage} == false ]] || die 'PLUGIN_ABI_STAGE must be true or false'
 [[ ${publish} == true || ${publish} == false ]] || die 'PLUGIN_ABI_PUBLISH must be true or false'
+[[ ${publish} != true || ${stage} == true ]] ||
+  die 'PLUGIN_ABI_PUBLISH=true also requires PLUGIN_ABI_STAGE=true'
+# Staging writes are commit-qualified, so they exercise the real publication
+# path while release.state=measurement still forbids public tag rendering.
 if [[ ${publish} == true ]]; then
   "${script_dir}/plugin-abi.sh" validate --release
 fi
@@ -84,7 +90,7 @@ inspect_native() {
 
 sdk_repository=localhost:5000/plugin-sdk-${arch}
 sdk_staging=''
-if [[ ${publish} == true ]]; then
+if [[ ${stage} == true ]]; then
   owner=${GITHUB_REPOSITORY_OWNER:?GITHUB_REPOSITORY_OWNER is required}
   owner=${owner,,}
   sdk_image=$(jq -er '.sdk_image' <<<"${ci_json}")
@@ -225,7 +231,7 @@ while IFS=$'\t' read -r host_id tag_suffix; do
       die "${arch} ${host_id} runtime uncompressed image exceeds its ceiling"
   fi
 
-  if [[ ${publish} == true ]]; then
+  if [[ ${stage} == true ]]; then
     runtime_staging="ghcr.io/${owner}/${runtime_image}:staging-${packaging_revision}-${arch}${tag_suffix}"
     retry_command 4 2 docker buildx imagetools create --tag "${runtime_staging}" \
       "${runtime_repository}@${runtime_index}"
@@ -252,7 +258,7 @@ if [[ $(jq -er '.release_state' <<<"${ci_json}") == ready ]]; then
   ((sdk_uncompressed <= $(jq -er '.sdk.uncompressed' <<<"${limits}"))) || die "${arch} SDK uncompressed image exceeds its ceiling"
 fi
 
-if [[ ${publish} == true ]]; then
+if [[ ${stage} == true ]]; then
   retry_command 4 2 docker buildx imagetools create --tag "${sdk_staging}" \
     "${sdk_repository}@${sdk_index}"
   inspect_native "${sdk_staging}" "${work}/sdk-staging.json"

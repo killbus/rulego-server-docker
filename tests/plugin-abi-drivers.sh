@@ -38,6 +38,25 @@ size_line=$(grep -n 'runtime_uncompressed=$(docker image inspect' "${build}" | c
 grep -Fq 'GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}' .github/workflows/plugin-abi.yml
 grep -Fq 'GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}' .github/workflows/plugin-abi-publish.yml
 
+# Staging writes and the immutable-tag release gate are separate switches, so a
+# measurement-state contract can still stage commit-qualified images.
+grep -Fq 'stage=${PLUGIN_ABI_STAGE:-false}' "${build}"
+(( $(grep -Fc 'if [[ ${publish} == true ]]; then' "${build}") == 1 )) || {
+  echo 'only the release gate may branch on PLUGIN_ABI_PUBLISH in the build driver' >&2
+  exit 1
+}
+(( $(grep -Fc 'if [[ ${stage} == true ]]; then' "${build}") == 3 )) || {
+  echo 'every commit-qualified staging write must branch on PLUGIN_ABI_STAGE' >&2
+  exit 1
+}
+grep -Fq 'PLUGIN_ABI_PUBLISH=true also requires PLUGIN_ABI_STAGE=true' "${build}"
+grep -Fq 'PLUGIN_ABI_STAGE: "true"' .github/workflows/plugin-abi-publish.yml
+grep -Fq 'PLUGIN_ABI_PUBLISH: ${{ github.event.inputs.publish }}' .github/workflows/plugin-abi-publish.yml
+grep -Fq 'dispatch requires publish=true or staging_only=true' .github/workflows/plugin-abi-publish.yml
+
+expect_failure 'PLUGIN_ABI_PUBLISH=true also requires PLUGIN_ABI_STAGE=true' env \
+  GITHUB_ACTIONS=true PLUGIN_ABI_PUBLISH=true scripts/plugin-abi-build.sh amd64
+
 grep -Fq '.index_digest' scripts/plugin-abi-publish.sh
 grep -Fq '.sdk.child_digest' scripts/plugin-abi-publish.sh
 grep -Fq 'selector=".runtime[\"${host_id}\"]"' scripts/plugin-abi-publish.sh
