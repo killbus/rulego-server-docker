@@ -72,6 +72,42 @@ runtime_load() {
   fi
 }
 
+runtime_component() {
+  local expectation=${1:?component expectation is required}
+  local image=${2:?runtime image is required}
+  local arch=${3:?architecture is required}
+  local component_type=${4:?component type is required}
+  [[ ${expectation} == present || ${expectation} == absent ]] \
+    || die 'component expectation must be present or absent'
+
+  local work container port response
+  mkdir -p "${repository_root}/tmp"
+  work=$(mktemp -d "${repository_root}/tmp/plugin-components.XXXXXX")
+  container="rulego-components-${arch}-$$"
+  trap 'docker rm -f "${container}" >/dev/null 2>&1 || true; rm -rf -- "${work}"' RETURN
+  retry_command 4 2 docker pull --platform "linux/${arch}" "${image}" >/dev/null
+  docker run -d --platform "linux/${arch}" --name "${container}" -p 127.0.0.1::9090 \
+    "${image}" >/dev/null
+  port=$(docker port "${container}" 9090/tcp | sed -n 's/.*://p' | head -1)
+  [[ ${port} =~ ^[0-9]+$ ]] || die 'runtime did not publish port 9090'
+  response=${work}/components.json
+  for _ in $(seq 1 100); do
+    if curl --fail --silent "http://127.0.0.1:${port}/api/v1/components" >"${response}"; then break; fi
+    if [[ $(docker inspect -f '{{.State.Running}}' "${container}") != true ]]; then break; fi
+    sleep 0.2
+  done
+  [[ -s ${response} ]] \
+    || { docker logs "${container}" >&2; die 'RuleGo component API did not become ready'; }
+
+  if [[ ${expectation} == present ]]; then
+    jq -e --arg type "${component_type}" '.nodes | any(.type == $type)' "${response}" >/dev/null \
+      || die "required runtime component is missing: ${component_type}"
+  else
+    jq -e --arg type "${component_type}" '(.nodes | any(.type == $type)) | not' "${response}" >/dev/null \
+      || die "unexpected runtime component is present: ${component_type}"
+  fi
+}
+
 runtime_filesystem() {
   local image=${1:?runtime image is required}
   local arch=${2:?architecture is required}
@@ -154,6 +190,11 @@ case ${1:-} in
     [[ $# == 4 ]] || die 'usage: verify-plugin-runtime.sh reject <image> <arch> <plugin>'
     runtime_load reject "$2" "$3" "$4"
     ;;
+  component)
+    [[ $# == 5 ]] \
+      || die 'usage: verify-plugin-runtime.sh component <image> <arch> <present|absent> <component-type>'
+    runtime_component "$4" "$2" "$3" "$5"
+    ;;
   filesystem)
     [[ $# == 3 ]] || die 'usage: verify-plugin-runtime.sh filesystem <image> <arch>'
     runtime_filesystem "$2" "$3"
@@ -162,5 +203,5 @@ case ${1:-} in
     [[ $# == 3 ]] || die 'usage: verify-plugin-runtime.sh missing-libc <image> <arch>'
     missing_libc "$2" "$3"
     ;;
-  *) die 'usage: verify-plugin-runtime.sh <load|reject|filesystem|missing-libc> ...' ;;
+  *) die 'usage: verify-plugin-runtime.sh <load|reject|component|filesystem|missing-libc> ...' ;;
 esac

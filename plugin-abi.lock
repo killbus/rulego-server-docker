@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "abi_id": "abi-3e0c9d46dddaf6235cfe609d543222f07f8e1abf3374f0669bf703df85063885",
+  "abi_id": "abi-7ef7f30db8598b7fdce710287df49bdb047d165749b749fe86c0ef448daf0c3f",
   "abi": {
     "go": {
       "version": "1.25.0",
@@ -54,7 +54,10 @@
     "build": {
       "host_mode": "exe",
       "plugin_mode": "plugin",
-      "host_tags": [],
+      "hosts": [
+        {"id": "plugin", "tags": [], "tag_suffix": "-plugin"},
+        {"id": "ai-plugin", "tags": ["with_ai"], "tag_suffix": "-ai-plugin"}
+      ],
       "host_flags": ["-trimpath"],
       "plugin_flags": ["-trimpath", "-buildvcs=false"],
       "host_ldflags": [],
@@ -64,11 +67,21 @@
       "plugin_symbol": "Plugins"
     }
   },
+  "compatibility": {
+    "previous_sdk": {
+      "abi_id": "abi-3e0c9d46dddaf6235cfe609d543222f07f8e1abf3374f0669bf703df85063885",
+      "repository": "ghcr.io/killbus/rulego-plugin-sdk",
+      "index_digest": "sha256:c5fadb574a1171854eead3a9f94484e1470aba5496d51c2751a6313d7f2b8d01",
+      "children": {
+        "amd64": "sha256:91341e7fd32c080d7d05561b554a1b556512fe2518ec85f402800550584f652d",
+        "arm64": "sha256:ba8b23897e5a0dcb01c7ed88dc4c113c9e1e1aa03d0cf53695ee0fb9a7a71192"
+      }
+    }
+  },
   "release": {
-    "state": "ready",
+    "state": "measurement",
     "sdk_image": "rulego-plugin-sdk",
     "runtime_image": "rulego-server",
-    "runtime_tag_suffix": "-plugin",
     "manifest_path": "/usr/share/rulego/plugin-abi.json",
     "ci": {"runners": {"amd64": "ubuntu-24.04", "arm64": "ubuntu-24.04-arm"}},
     "editor_payload": {
@@ -81,12 +94,18 @@
     },
     "size_limits": {
       "amd64": {
-        "sdk": {"compressed": 1500000000, "uncompressed": 3800000000},
-        "runtime": {"compressed": 35000000, "uncompressed": 80000000}
+        "sdk": {"compressed": null, "uncompressed": null},
+        "runtime": {
+          "plugin": {"compressed": null, "uncompressed": null},
+          "ai-plugin": {"compressed": null, "uncompressed": null}
+        }
       },
       "arm64": {
-        "sdk": {"compressed": 1500000000, "uncompressed": 3800000000},
-        "runtime": {"compressed": 35000000, "uncompressed": 90000000}
+        "sdk": {"compressed": null, "uncompressed": null},
+        "runtime": {
+          "plugin": {"compressed": null, "uncompressed": null},
+          "ai-plugin": {"compressed": null, "uncompressed": null}
+        }
       }
     }
   }

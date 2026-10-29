@@ -38,7 +38,23 @@ grep -Fq 'GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}' .github/workflows/plugin-ab
 grep -Fq 'GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}' .github/workflows/plugin-abi-publish.yml
 
 grep -Fq '.index_digest' scripts/plugin-abi-publish.sh
-grep -Fq '.child_digest' scripts/plugin-abi-publish.sh
+grep -Fq '.sdk.child_digest' scripts/plugin-abi-publish.sh
+grep -Fq 'selector=".runtime[\"${host_id}\"]"' scripts/plugin-abi-publish.sh
+grep -Fq 'runtime_staging_indexes' scripts/plugin-abi-publish.sh
+grep -Fq -- '--argjson runtime "${runtime_refs}"' scripts/plugin-abi-publish.sh
+grep -Fq '"${runtime_staging_indexes}" release' scripts/plugin-abi-publish.sh
+grep -Fq -- '--argjson runtime "${runtime_evidence}"' scripts/plugin-abi-build.sh
+grep -Fq 'component "${runtime_ref}" "${arch}"' scripts/plugin-abi-build.sh
+grep -Fq '"${component_expectation}" ai/agent' scripts/plugin-abi-build.sh
+grep -Fq 'render compatibility-sdk "${arch}"' scripts/plugin-abi-build.sh
+grep -Fq "legacy_abi_id=\$(jq -er '.abi_id' <<<\"\${compatibility_json}\")" scripts/plugin-abi-build.sh
+grep -Fq "legacy_sdk_ref=\$(jq -er '.reference' <<<\"\${compatibility_json}\")" scripts/plugin-abi-build.sh
+grep -Fq '"${legacy_sdk_ref}" . "/output/legacy-sdk-probe-${arch}.so"' scripts/plugin-abi-build.sh
+grep -Fq 'load "${runtime_ref}" "${arch}" "${work}/sdk-output/legacy-sdk-probe-${arch}.so"' scripts/plugin-abi-build.sh
+if grep -Eq 'legacy_sdk_ref=.*rulego-plugin-sdk:|compatibility\.previous_sdk\.repository.*:' scripts/plugin-abi-build.sh; then
+  echo 'legacy compatibility probe uses a mutable tag instead of a digest pin' >&2
+  exit 1
+fi
 grep -Fq 'publish_immutable_image_tag' scripts/plugin-abi-publish.sh
 grep -Fq 'immutable tag already points to a different digest' scripts/lib.sh
 
