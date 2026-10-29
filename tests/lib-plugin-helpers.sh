@@ -7,6 +7,7 @@ repository_root=$(cd -- "${script_dir}/.." && pwd)
 # shellcheck source=scripts/lib.sh
 source "${repository_root}/scripts/lib.sh"
 
+mkdir -p "${repository_root}/tmp"
 test_root=$(mktemp -d "${repository_root}/tmp/lib-plugin-helpers.XXXXXX")
 trap 'rm -rf -- "${test_root}"' EXIT
 mkdir -p "${test_root}/bin" "${test_root}/safe-source/blobs/sha256"

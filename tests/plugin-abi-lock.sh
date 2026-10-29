@@ -6,6 +6,7 @@ script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 repository_root=$(cd -- "${script_dir}/.." && pwd)
 cd "${repository_root}"
 
+mkdir -p "${repository_root}/tmp"
 test_root=$(mktemp -d "${repository_root}/tmp/plugin-abi-lock.XXXXXX")
 trap 'rm -rf -- "${test_root}"' EXIT
 

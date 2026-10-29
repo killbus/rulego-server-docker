@@ -6,6 +6,7 @@ script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 repository_root=$(cd -- "${script_dir}/.." && pwd)
 cd "${repository_root}"
 
+mkdir -p "${repository_root}/tmp"
 test_root=$(mktemp -d "${repository_root}/tmp/prepare-plugin-abi.XXXXXX")
 trap 'rm -rf -- "${test_root}"' EXIT
 mkdir -p "${test_root}/bin" "${test_root}/source/server" "${test_root}/build" "${test_root}/editor"
