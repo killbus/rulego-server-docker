@@ -30,7 +30,11 @@ assert_contains "${workflow}" 'cron: "17 4 * * *"'
 assert_contains "${workflow}" 'workflow_dispatch:'
 assert_contains "${workflow}" 'contents: read'
 assert_contains "${workflow}" 'packages: write'
-assert_contains "${workflow}" 'platforms: linux/amd64,linux/arm64'
+assert_contains "${workflow}" 'runner: ubuntu-24.04-arm'
+assert_contains "${workflow}" 'platforms: ${{ matrix.platform }}'
+assert_contains "${workflow}" 'push-by-digest=true'
+assert_contains "${workflow}" 'docker buildx imagetools create'
+assert_contains "${workflow}" 'args+=(--annotation "$annotation")'
 assert_contains "${workflow}" 'password: ${{ secrets.GITHUB_TOKEN }}'
 assert_contains "${workflow}" 'DOCKER_METADATA_ANNOTATIONS_LEVELS: manifest,index'
 assert_contains "${workflow}" 'type=raw,value=${{ needs.resolve.outputs.version }}${{ matrix.tag_suffix }}'
@@ -39,11 +43,16 @@ assert_contains "${workflow}" 'if [[ $moving_digest != "$version_digest" ]]; the
 assert_contains "${workflow}" 'provenance: mode=max'
 assert_contains "${workflow}" 'sbom: true'
 assert_contains "${workflow}" "uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"
-assert_contains "${workflow}" "uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8"
+if grep -Fq 'docker/setup-qemu-action' "${workflow}"; then
+  echo 'publish workflow must use native architecture runners instead of QEMU' >&2
+  exit 1
+fi
 assert_contains "${workflow}" "uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e"
 assert_contains "${workflow}" "uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f"
 assert_contains "${workflow}" "uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302"
 assert_contains "${workflow}" "uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a"
+assert_contains "${workflow}" "uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02"
+assert_contains "${workflow}" "uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093"
 
 while IFS= read -r action_reference; do
   action_revision=${action_reference##*@}

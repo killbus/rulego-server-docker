@@ -113,11 +113,11 @@ jobs:
 
           echo "Selected ${version}; current stable=${latest_version}; build=${should_build}; force=${force}"
 
-  publish:
-    name: Publish ${{ matrix.variant }} image
+  build:
+    name: Build ${{ matrix.variant }} image on ${{ matrix.architecture }}
     needs: resolve
     if: needs.resolve.outputs.should_build == 'true'
-    runs-on: ubuntu-24.04
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
     strategy:
       fail-fast: false
@@ -126,21 +126,33 @@ jobs:
           - variant: standard
             tag_suffix: ""
             moving_tag: latest
+            architecture: amd64
+            platform: linux/amd64
+            runner: ubuntu-24.04
+          - variant: standard
+            tag_suffix: ""
+            moving_tag: latest
+            architecture: arm64
+            platform: linux/arm64
+            runner: ubuntu-24.04-arm
           - variant: all
             tag_suffix: -all
             moving_tag: latest-all
+            architecture: amd64
+            platform: linux/amd64
+            runner: ubuntu-24.04
+          - variant: all
+            tag_suffix: -all
+            moving_tag: latest-all
+            architecture: arm64
+            platform: linux/arm64
+            runner: ubuntu-24.04-arm
     steps:
       - name: Check out repository
         # actions/checkout v7.0.1
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
-
-      - name: Set up QEMU
-        # docker/setup-qemu-action v4.2.0
-        uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8
-        with:
-          platforms: arm64
 
       - name: Set up Docker Buildx
         # docker/setup-buildx-action v4.3.0
@@ -162,7 +174,7 @@ jobs:
         run: scripts/fetch-release.sh "$RELEASE_VERSION" "$VARIANT"
 
       - name: Verify local image filesystems and smoke tests
-        run: scripts/verify-build.sh
+        run: scripts/verify-build.sh "${{ matrix.architecture }}"
 
       - name: Generate image metadata
         id: metadata
@@ -172,9 +184,6 @@ jobs:
           DOCKER_METADATA_ANNOTATIONS_LEVELS: manifest,index
         with:
           images: ${{ needs.resolve.outputs.image }}
-          tags: |
-            type=raw,value=${{ needs.resolve.outputs.version }}${{ matrix.tag_suffix }}
-            type=raw,value=${{ matrix.moving_tag }},enable=${{ needs.resolve.outputs.is_latest == 'true' }}
           labels: |
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
             org.opencontainers.image.version=${{ needs.resolve.outputs.version }}
@@ -188,21 +197,127 @@ jobs:
             org.opencontainers.image.version=${{ needs.resolve.outputs.version }}
             io.rulego.image.variant=${{ matrix.variant }}
 
-      - name: Build and push multi-platform image
+      - name: Build and push native image by digest
+        id: build
         # docker/build-push-action v7.3.0
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a
         with:
           context: .
           file: Dockerfile
-          platforms: linux/amd64,linux/arm64
-          push: true
-          tags: ${{ steps.metadata.outputs.tags }}
+          platforms: ${{ matrix.platform }}
           labels: ${{ steps.metadata.outputs.labels }}
           annotations: ${{ steps.metadata.outputs.annotations }}
-          cache-from: type=gha,scope=rulego-server-${{ matrix.variant }}
-          cache-to: type=gha,mode=max,scope=rulego-server-${{ matrix.variant }}
+          outputs: type=image,name=${{ needs.resolve.outputs.image }},push-by-digest=true,name-canonical=true,push=true
+          cache-from: type=gha,scope=rulego-server-${{ matrix.variant }}-${{ matrix.architecture }}
+          cache-to: type=gha,mode=max,scope=rulego-server-${{ matrix.variant }}-${{ matrix.architecture }}
           provenance: mode=max
           sbom: true
+
+      - name: Export image digest
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          mkdir -p "${RUNNER_TEMP}/digests"
+          touch "${RUNNER_TEMP}/digests/${DIGEST#sha256:}"
+
+      - name: Upload image digest
+        # actions/upload-artifact v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: image-digest-${{ matrix.variant }}-${{ matrix.architecture }}
+          path: ${{ runner.temp }}/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  publish:
+    name: Publish ${{ matrix.variant }} image index
+    needs: [resolve, build]
+    if: needs.resolve.outputs.should_build == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - variant: standard
+            tag_suffix: ""
+            moving_tag: latest
+          - variant: all
+            tag_suffix: -all
+            moving_tag: latest-all
+    steps:
+      - name: Check out repository
+        # actions/checkout v7.0.1
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+
+      - name: Set up Docker Buildx
+        # docker/setup-buildx-action v4.3.0
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e
+
+      - name: Log in to GHCR
+        # docker/login-action v4.6.0
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Download image digests
+        # actions/download-artifact v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          pattern: image-digest-${{ matrix.variant }}-*
+          path: ${{ runner.temp }}/digests
+          merge-multiple: true
+
+      - name: Generate image metadata
+        id: metadata
+        # docker/metadata-action v6.2.0
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302
+        env:
+          DOCKER_METADATA_ANNOTATIONS_LEVELS: index
+        with:
+          images: ${{ needs.resolve.outputs.image }}
+          tags: |
+            type=raw,value=${{ needs.resolve.outputs.version }}${{ matrix.tag_suffix }}
+            type=raw,value=${{ matrix.moving_tag }},enable=${{ needs.resolve.outputs.is_latest == 'true' }}
+          annotations: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.version=${{ needs.resolve.outputs.version }}
+            io.rulego.image.variant=${{ matrix.variant }}
+
+      - name: Create multi-platform image index
+        working-directory: ${{ runner.temp }}/digests
+        env:
+          IMAGE: ${{ needs.resolve.outputs.image }}
+          TAGS: ${{ steps.metadata.outputs.tags }}
+          ANNOTATIONS: ${{ steps.metadata.outputs.annotations }}
+        run: |
+          set -Eeuo pipefail
+          mapfile -t digests < <(printf '%s\n' *)
+          ((${#digests[@]} == 2))
+          sources=()
+          for digest in "${digests[@]}"; do
+            [[ $digest =~ ^[0-9a-f]{64}$ ]]
+            sources+=("${IMAGE}@sha256:${digest}")
+          done
+          args=()
+          while IFS= read -r tag; do
+            [[ -z $tag ]] || args+=(--tag "$tag")
+          done <<<"$TAGS"
+          while IFS= read -r annotation; do
+            [[ -z $annotation ]] || args+=(--annotation "$annotation")
+          done <<<"$ANNOTATIONS"
+          docker buildx imagetools create "${args[@]}" "${sources[@]}"
+
+      - name: Download and verify upstream release payloads
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_VERSION: ${{ needs.resolve.outputs.version }}
+          VARIANT: ${{ matrix.variant }}
+        run: scripts/fetch-release.sh "$RELEASE_VERSION" "$VARIANT"
 
       - name: Verify published version manifest and executables
         env:
