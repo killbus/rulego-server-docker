@@ -33,12 +33,36 @@ assert_contains "${workflow}" 'packages: write'
 assert_contains "${workflow}" 'runner: ubuntu-24.04-arm'
 assert_contains "${workflow}" 'platforms: ${{ matrix.platform }}'
 assert_contains "${workflow}" 'push-by-digest=true'
-assert_contains "${workflow}" 'docker buildx imagetools create'
-assert_contains "${workflow}" 'args+=(--annotation "$annotation")'
+assert_contains "${workflow}" 'run: scripts/publish-index.sh "${RUNNER_TEMP}/digests" "${IMAGE}"'
+assert_contains "${workflow}" 'touch "${RUNNER_TEMP}/digests/${ARCHITECTURE}.${DIGEST#sha256:}"'
+
+# Index assembly lives in a script so its pairing guards stay offline-testable.
+index_script=scripts/publish-index.sh
+assert_contains "${index_script}" 'docker buildx imagetools create'
+assert_contains "${index_script}" 'args+=(--annotation "${annotation}")'
+if grep -Fq -- '--annotation "index:${annotation}"' "${index_script}"; then
+  echo 'publish-index.sh must not prefix metadata annotations twice' >&2
+  exit 1
+fi
+assert_contains "${index_script}" 'canonical_tag='
+if grep -Eq '\[\$\{#digests\[@\]\} == 2\]' "${index_script}"; then
+  echo 'index assembly must bind digests to architectures, not just count them' >&2
+  exit 1
+fi
 assert_contains "${workflow}" 'password: ${{ secrets.GITHUB_TOKEN }}'
 assert_contains "${workflow}" 'DOCKER_METADATA_ANNOTATIONS_LEVELS: manifest,index'
 assert_contains "${workflow}" 'type=raw,value=${{ needs.resolve.outputs.version }}${{ matrix.tag_suffix }}'
-assert_contains "${workflow}" "type=raw,value=\${{ matrix.moving_tag }},enable=\${{ needs.resolve.outputs.is_latest == 'true' }}"
+assert_contains "${workflow}" "type=raw,value=\${{ matrix.moving_tag }},enable=\${{ needs.resolve.outputs.is_latest == 'true' && needs.resolve.outputs.staging_only == 'false' }}"
+assert_contains "${workflow}" 'staging-'
+assert_contains "${workflow}" 'if [[ $force == false && $staging_only == false ]]; then'
+# publish-index.sh treats the first metadata tag as the canonical tag for the run,
+# so the version or staging tag must be declared before the moving alias.
+version_or_staging_line=$(grep -n 'type=raw,value=staging-\|type=raw,value=${{ needs.resolve.outputs.version }}' "${workflow}" | head -n 1 | cut -d: -f1)
+moving_line=$(grep -n 'type=raw,value=${{ matrix.moving_tag }}' "${workflow}" | head -n 1 | cut -d: -f1)
+((version_or_staging_line < moving_line)) || {
+  echo 'the canonical version or staging tag must be declared before the moving alias' >&2
+  exit 1
+}
 assert_contains "${workflow}" 'if [[ $moving_digest != "$version_digest" ]]; then all_complete=false; fi'
 assert_contains "${workflow}" 'provenance: mode=max'
 assert_contains "${workflow}" 'sbom: true'

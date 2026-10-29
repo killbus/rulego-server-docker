@@ -161,6 +161,11 @@ Maintainers can also run **Publish RuleGo Server images** from the Actions tab:
 - `force` rebuilds/repairs the version tags even if complete indexes already
   exist. It still cannot move `latest` aliases unless the requested version is
   the current upstream stable release.
+- `staging_only` builds the whole pipeline and publishes a single run-qualified
+  `staging-<version>[-all]-<run id>` tag. It never writes a version tag or a
+  moving alias, and it always builds even when the release tags are already
+  complete, so it exercises the publish path for real without changing anything
+  downstream users pull.
 
 The workflow derives the GHCR owner from the repository context, logs in with
 the built-in `GITHUB_TOKEN`, and needs only `contents: read` and
@@ -169,8 +174,12 @@ are pinned to reviewed commit SHAs; their release versions are recorded beside
 each use.
 
 The independent [Plugin ABI verification workflow](.github/workflows/plugin-abi.yml)
-calls one repository command on each native amd64 and arm64 runner. That
-command uses a job-local registry, consumes the SDK by digest, exports the
+first runs `tests/run.sh` in one job, then calls one repository command on each
+native amd64 and arm64 runner. `tests/run.sh` is fully offline—it needs neither
+Docker, Go, nor `readelf`—and covers release preparation, repository and image
+contracts, Plugin ABI rules, manifest validation, index assembly, and injected
+failures. The native command uses a job-local registry, consumes the SDK by
+digest, exports the
 matching host rootfs, builds both runtime hosts, verifies their `ai/agent`
 component difference, loads a host-owned ABI probe in each, proves
 wrong-architecture, wrong-ABI, and missing-libc failures, and records image
@@ -214,12 +223,15 @@ scripts/plugin-abi.sh validate --candidate
 
 The publishing workflow builds and smoke-tests each architecture on its native
 GitHub-hosted runner, pushes architecture images by digest, and then assembles
-the version and moving tags as a two-platform OCI index. It runs
+the version and moving tags as a two-platform OCI index
+(`scripts/publish-index.sh`). That script binds each pushed digest to its
+architecture and requires the two to differ before assembling the index, then
+reports the tag it published so the run can be verified through it. It runs
 `scripts/verify-build.sh` before publication and `scripts/verify-published.sh`
 afterward. These CI-only gates perform native non-root HTTP smoke tests,
-runtime-content checks, manifest checks, executable digest comparisons, and
-pair every architecture in the assembled index with its SLSA provenance and SBOM
-attestations.
+runtime-content checks, manifest completeness checks, executable digest
+comparisons, and pair every architecture in the assembled index with its SLSA
+provenance and SBOM attestations.
 
 Transient API, registry, and download failures—including disconnected streams,
 HTTP 429/5xx responses, and GitHub rate-limit responses—are retried with

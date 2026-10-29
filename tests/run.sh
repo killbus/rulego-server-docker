@@ -17,6 +17,7 @@ for test_script in \
   "${script_dir}/plugin-publication-policy.sh" \
   "${script_dir}/prepare-plugin-abi.sh" \
   "${script_dir}/resolve-release.sh" \
+  "${script_dir}/publish-index.sh" \
   "${script_dir}/retry-and-manifest.sh" \
   "${script_dir}/verify-published-failures.sh"; do
   "${test_script}"

@@ -14,6 +14,11 @@ on:
         required: false
         default: false
         type: boolean
+      staging_only:
+        description: "Publish only the immutable staging tag and keep every release tag untouched"
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -33,6 +38,7 @@ jobs:
       is_latest: ${{ steps.release.outputs.is_latest }}
       should_build: ${{ steps.release.outputs.should_build }}
       version: ${{ steps.release.outputs.version }}
+      staging_only: ${{ steps.release.outputs.staging_only }}
     steps:
       - name: Check out repository
         # actions/checkout v7.0.1
@@ -60,6 +66,7 @@ jobs:
           REPOSITORY_OWNER: ${{ github.repository_owner }}
           REQUESTED_FORCE: ${{ github.event.inputs.force }}
           REQUESTED_VERSION: ${{ github.event.inputs.version }}
+          REQUESTED_STAGING_ONLY: ${{ github.event.inputs.staging_only }}
         shell: bash
         run: |
           set -Eeuo pipefail
@@ -78,9 +85,13 @@ jobs:
           image="ghcr.io/${owner}/rulego-server"
           force=false
           if [[ $EVENT_NAME == workflow_dispatch && $REQUESTED_FORCE == true ]]; then force=true; fi
+          staging_only=false
+          if [[ $EVENT_NAME == workflow_dispatch && $REQUESTED_STAGING_ONLY == true ]]; then staging_only=true; fi
 
           should_build=true
-          if [[ $force == false ]]; then
+          # A staging run always builds: the release tags already being complete is
+          # exactly the state that makes the short circuit skip the path under test.
+          if [[ $force == false && $staging_only == false ]]; then
             all_complete=true
             for suffix in '' '-all'; do
               version_ref="${image}:${version}${suffix}"
@@ -109,9 +120,10 @@ jobs:
             echo "is_latest=${is_latest}"
             echo "should_build=${should_build}"
             echo "version=${version}"
+            echo "staging_only=${staging_only}"
           } >>"$GITHUB_OUTPUT"
 
-          echo "Selected ${version}; current stable=${latest_version}; build=${should_build}; force=${force}"
+          echo "Selected ${version}; current stable=${latest_version}; build=${should_build}; force=${force}; staging_only=${staging_only}"
 
   build:
     name: Build ${{ matrix.variant }} image on ${{ matrix.architecture }}
@@ -215,10 +227,11 @@ jobs:
 
       - name: Export image digest
         env:
+          ARCHITECTURE: ${{ matrix.architecture }}
           DIGEST: ${{ steps.build.outputs.digest }}
         run: |
           mkdir -p "${RUNNER_TEMP}/digests"
-          touch "${RUNNER_TEMP}/digests/${DIGEST#sha256:}"
+          touch "${RUNNER_TEMP}/digests/${ARCHITECTURE}.${DIGEST#sha256:}"
 
       - name: Upload image digest
         # actions/upload-artifact v4
@@ -281,36 +294,21 @@ jobs:
         with:
           images: ${{ needs.resolve.outputs.image }}
           tags: |
-            type=raw,value=${{ needs.resolve.outputs.version }}${{ matrix.tag_suffix }}
-            type=raw,value=${{ matrix.moving_tag }},enable=${{ needs.resolve.outputs.is_latest == 'true' }}
+            type=raw,value=${{ needs.resolve.outputs.version }}${{ matrix.tag_suffix }},enable=${{ needs.resolve.outputs.staging_only == 'false' }}
+            type=raw,value=staging-${{ needs.resolve.outputs.version }}${{ matrix.tag_suffix }}-${{ github.run_id }},enable=${{ needs.resolve.outputs.staging_only == 'true' }}
+            type=raw,value=${{ matrix.moving_tag }},enable=${{ needs.resolve.outputs.is_latest == 'true' && needs.resolve.outputs.staging_only == 'false' }}
           annotations: |
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
             org.opencontainers.image.version=${{ needs.resolve.outputs.version }}
             io.rulego.image.variant=${{ matrix.variant }}
 
       - name: Create multi-platform image index
-        working-directory: ${{ runner.temp }}/digests
+        id: index
         env:
           IMAGE: ${{ needs.resolve.outputs.image }}
           TAGS: ${{ steps.metadata.outputs.tags }}
           ANNOTATIONS: ${{ steps.metadata.outputs.annotations }}
-        run: |
-          set -Eeuo pipefail
-          mapfile -t digests < <(printf '%s\n' *)
-          ((${#digests[@]} == 2))
-          sources=()
-          for digest in "${digests[@]}"; do
-            [[ $digest =~ ^[0-9a-f]{64}$ ]]
-            sources+=("${IMAGE}@sha256:${digest}")
-          done
-          args=()
-          while IFS= read -r tag; do
-            [[ -z $tag ]] || args+=(--tag "$tag")
-          done <<<"$TAGS"
-          while IFS= read -r annotation; do
-            [[ -z $annotation ]] || args+=(--annotation "$annotation")
-          done <<<"$ANNOTATIONS"
-          docker buildx imagetools create "${args[@]}" "${sources[@]}"
+        run: scripts/publish-index.sh "${RUNNER_TEMP}/digests" "${IMAGE}"
 
       - name: Download and verify upstream release payloads
         env:
@@ -321,13 +319,11 @@ jobs:
 
       - name: Verify published version manifest and executables
         env:
-          IMAGE: ${{ needs.resolve.outputs.image }}
-          RELEASE_VERSION: ${{ needs.resolve.outputs.version }}
-          TAG_SUFFIX: ${{ matrix.tag_suffix }}
-        run: scripts/verify-published.sh "${IMAGE}:${RELEASE_VERSION}${TAG_SUFFIX}"
+          PUBLISHED_TAG: ${{ steps.index.outputs.canonical_tag }}
+        run: scripts/verify-published.sh "${PUBLISHED_TAG}"
 
       - name: Verify published moving alias
-        if: needs.resolve.outputs.is_latest == 'true'
+        if: needs.resolve.outputs.is_latest == 'true' && needs.resolve.outputs.staging_only == 'false'
         env:
           IMAGE: ${{ needs.resolve.outputs.image }}
           MOVING_TAG: ${{ matrix.moving_tag }}
