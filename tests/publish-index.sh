@@ -192,6 +192,36 @@ actual_output=$(<"${GITHUB_OUTPUT}")
 }
 unset GITHUB_OUTPUT
 
+# Aliases declared one per line are all read. `read -a` stops at the first newline, so a caller that
+# switched from spaces to lines would have had every alias after the first dropped and then written as
+# if it were immutable. The exactly-one-canonical guard below would catch that today, but the parser is
+# total instead of relying on a guard happening to cover it.
+TAGS="${version_tag}
+${image}:latest
+${image}:latest-all"
+MOVING_ALIASES="latest
+latest-all"
+rm -f -- "${docker_log}"
+GITHUB_OUTPUT=${test_root}/github_output_multiline
+: >"${GITHUB_OUTPUT}"
+run_publish ''
+# One create call, carrying exactly one --tag, which is the canonical one.
+[[ $(grep -c -- '--tag ' "${docker_log}") == 1 ]] || {
+  printf 'both aliases must be withheld, wrote: %s\n' "$(cat "${docker_log}")" >&2
+  exit 1
+}
+grep -q -- "--tag ${version_tag}" "${docker_log}" || {
+  echo 'the canonical tag must be the one written' >&2
+  exit 1
+}
+actual_output=$(<"${GITHUB_OUTPUT}")
+expected_output=$(printf 'canonical_tag=%s\nmoving_aliases=%s\n' "${version_tag}" "${image}:latest ${image}:latest-all")
+[[ ${actual_output} == "${expected_output}" ]] || {
+  printf 'multi-line declaration must yield both aliases:\n%s\n----\nexpected:\n%s\n' "${actual_output}" "${expected_output}" >&2
+  exit 1
+}
+unset GITHUB_OUTPUT
+
 # A staging run has no alias at all: one canonical tag and empty output is the normal case,
 # not an error, so this must stay green without MOVING_ALIASES being set.
 write_digests

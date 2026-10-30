@@ -53,7 +53,13 @@ done <<<"${TAGS-}"
 # the defect. The metadata inputs happen to list the immutable tag first today, so a single write
 # carried both the version tag and `latest`, and the public name pointed at content no one had
 # verified yet.
-read -r -a aliases <<<"${MOVING_ALIASES-}"
+declared=${MOVING_ALIASES-}
+# Newlines are folded into the separator rather than left to `read`, which stops at the first line:
+# a caller that passes one alias per line would otherwise have every alias after the first dropped,
+# and the alias it dropped would be published as if it were immutable. The exactly-one-canonical
+# guard below does turn that accident red today, but a parser that is total does not depend on a
+# guard happening to cover it.
+read -r -a aliases <<<"${declared//[$'\n\r']/ }"
 alias_refs=()
 # A bash array expands to one empty element under "${arr[@]-}" when it is empty, so the names are
 # filtered rather than trusted: an unset MOVING_ALIASES used to manufacture a `${image_reference}:`
