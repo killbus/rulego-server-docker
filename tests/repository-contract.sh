@@ -55,14 +55,24 @@ assert_contains "${workflow}" 'type=raw,value=${{ needs.resolve.outputs.version 
 assert_contains "${workflow}" "type=raw,value=\${{ matrix.moving_tag }},enable=\${{ needs.resolve.outputs.is_latest == 'true' && needs.resolve.outputs.staging_only == 'false' }}"
 assert_contains "${workflow}" 'staging-'
 assert_contains "${workflow}" 'if [[ $force == false && $staging_only == false ]]; then'
-# publish-index.sh treats the first metadata tag as the canonical tag for the run,
-# so the version or staging tag must be declared before the moving alias.
-version_or_staging_line=$(grep -n 'type=raw,value=staging-\|type=raw,value=${{ needs.resolve.outputs.version }}' "${workflow}" | head -n 1 | cut -d: -f1)
-moving_line=$(grep -n 'type=raw,value=${{ matrix.moving_tag }}' "${workflow}" | head -n 1 | cut -d: -f1)
-((version_or_staging_line < moving_line)) || {
-  echo 'the canonical version or staging tag must be declared before the moving alias' >&2
+# The moving alias is withheld from the assembly write and promoted only after verification, so the
+# workflow must declare which tag is movable to publish-index.sh rather than relying on the order of
+# the metadata inputs. Order was never a safety property: it held only while nobody re-ordered the
+# `tags:` block, and every assertion below would have stayed green if someone did.
+moving_alias_decl="MOVING_ALIASES: \${{ needs.resolve.outputs.is_latest == 'true' && needs.resolve.outputs.staging_only == 'false' && matrix.moving_tag || '' }}"
+assert_contains "${workflow}" "${moving_alias_decl}"
+promote_line=$(grep -n 'scripts/promote-alias.sh' "${workflow}" | head -n 1 | cut -d: -f1)
+verify_line=$(grep -n 'run: scripts/verify-published.sh "${PUBLISHED_TAG}"' "${workflow}" | head -n 1 | cut -d: -f1)
+((verify_line < promote_line)) || {
+  echo 'the alias may only be promoted after the canonical tag has been verified' >&2
   exit 1
 }
+# The promotion is authorised by the verifier's own digest, not by the writer that produced the tag.
+assert_contains "${workflow}" 'CANONICAL_DIGEST: ${{ steps.verify.outputs.verified_digest }}'
+if grep -q 'run: scripts/verify-published.sh "${IMAGE}:${MOVING_TAG}"' "${workflow}"; then
+  echo 'the moving alias is no longer written before verification, so re-verifying it separately is dead code' >&2
+  exit 1
+fi
 assert_contains "${workflow}" 'if [[ $moving_digest != "$version_digest" ]]; then all_complete=false; fi'
 assert_contains "${workflow}" 'provenance: mode=max'
 assert_contains "${workflow}" 'sbom: true'

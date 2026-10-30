@@ -308,6 +308,10 @@ jobs:
           IMAGE: ${{ needs.resolve.outputs.image }}
           TAGS: ${{ steps.metadata.outputs.tags }}
           ANNOTATIONS: ${{ steps.metadata.outputs.annotations }}
+          # Declared rather than inferred: publish-index.sh writes only the immutable tag and hands
+          # the alias back as data, for the verifier to authorise. Empty exactly when the metadata
+          # action does not produce one — a staging run, or a version that is not the latest.
+          MOVING_ALIASES: ${{ needs.resolve.outputs.is_latest == 'true' && needs.resolve.outputs.staging_only == 'false' && matrix.moving_tag || '' }}
         run: scripts/publish-index.sh "${RUNNER_TEMP}/digests" "${IMAGE}"
 
       - name: Download and verify upstream release payloads
@@ -318,13 +322,43 @@ jobs:
         run: scripts/fetch-release.sh "$RELEASE_VERSION" "$VARIANT"
 
       - name: Verify published version manifest and executables
+        id: verify
         env:
           PUBLISHED_TAG: ${{ steps.index.outputs.canonical_tag }}
         run: scripts/verify-published.sh "${PUBLISHED_TAG}"
 
-      - name: Verify published moving alias
+      # Runs only after the immutable tag has been verified, and refuses to move the alias unless the
+      # canonical name still resolves to exactly the digest that was just verified. This is the gap
+      # the single-write assembly did not have: `latest` used to point at unverified content for as
+      # long as verification took, and a verification failure left it there.
+      # The alias itself is not re-verified: promote-alias.sh refuses to move it unless the alias
+      # resolves to the same digest the step above already verified, and two names holding one digest
+      # carry one content. Re-pulling both platforms to check the same bytes again would buy a second
+      # sample of the registry, not a second look at the artifact.
+      - name: Promote the moving alias to the verified digest
         if: needs.resolve.outputs.is_latest == 'true' && needs.resolve.outputs.staging_only == 'false'
         env:
-          IMAGE: ${{ needs.resolve.outputs.image }}
-          MOVING_TAG: ${{ matrix.moving_tag }}
-        run: scripts/verify-published.sh "${IMAGE}:${MOVING_TAG}"
+          CANONICAL_TAG: ${{ steps.index.outputs.canonical_tag }}
+          # Taken from the step that verified the image, not from the step that wrote it: the alias
+          # may only be pointed at bytes the verifier actually looked at.
+          CANONICAL_DIGEST: ${{ steps.verify.outputs.verified_digest }}
+          # Space-separated list produced by publish-index.sh. Registry references contain no spaces,
+          # so it is split on words to give one argument per alias; quoted, a two-alias run would
+          # hand both names over as a single name that belongs to no repository.
+          ALIAS_LIST: ${{ steps.index.outputs.moving_aliases }}
+          PROMOTE_ALIAS_RECORD: ${{ runner.temp }}/alias-promotion-${{ matrix.variant }}.json
+        run: |
+          # shellcheck disable=SC2086
+          scripts/promote-alias.sh "${CANONICAL_TAG}" "${CANONICAL_DIGEST}" ${ALIAS_LIST}
+      - name: Upload the alias promotion record
+        if: always()
+        # actions/upload-artifact v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: alias-promotion-${{ matrix.variant }}-${{ github.run_id }}
+          path: ${{ runner.temp }}/alias-promotion-${{ matrix.variant }}.json
+          # Unlike the sibling uploads this must not be `error`: a run that went red before the
+          # promotion ever started genuinely has no record, and turning that absence into a second
+          # failure buries the first one. The record is what matters precisely when the promotion
+          # failed partway, and in that case the file exists.
+          if-no-files-found: ignore

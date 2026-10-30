@@ -121,6 +121,11 @@ Version tags are the reproducible choice. `latest` and `latest-all` point only
 to the current stable upstream release. A manual historical build never moves
 either alias backward.
 
+Both aliases move only after the version tag they point at has been verified, and
+never at a digest that changed while verification ran. Each promotion writes a
+record of where every alias pointed beforehand, which is what makes a bad move
+reversible instead of something a maintainer repairs from memory.
+
 ## Verification model
 
 The publishing job establishes a continuous two-link trust chain for every
@@ -133,6 +138,16 @@ variant and architecture:
 2. It hashes the executable extracted from that verified archive, exports the
    built image filesystem, and proves `/app/rulego-server` has the same hash.
    After pushing, it pulls each platform image and repeats the comparison.
+
+Publication is two-phase, so those checks gate the public name rather than
+merely follow it. `scripts/publish-index.sh` writes the immutable version tag
+alone; the workflow then verifies that tag and reports the digest it verified;
+`scripts/promote-alias.sh` re-reads the version tag and points the alias at that
+digest only while it still holds exactly those bytes. Between the two writes the
+new build is reachable by its immutable name, and a verification failure leaves
+`latest` where it was. Before this, one command assembled the version tag and the
+alias together, so `latest` advertised unverified content for as long as
+verification took and stayed there if verification failed.
 
 GitHub publishes the digest of the compressed release archive, not the digest
 of the executable inside it. These two checks deliberately connect those

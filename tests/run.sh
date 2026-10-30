@@ -5,6 +5,7 @@ set -Eeuo pipefail
 script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 
 for test_script in \
+  "${script_dir}/alias-promotion.sh" \
   "${script_dir}/fetch-release-failure.sh" \
   "${script_dir}/fetch-release-success.sh" \
   "${script_dir}/fetch-plugin-editor.sh" \

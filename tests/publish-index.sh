@@ -48,6 +48,7 @@ run_publish() {
     TMPDIR=/tmp \
     MOCK_DOCKER_LOG="${docker_log}" \
     TAGS="${TAGS}" \
+    MOVING_ALIASES="${MOVING_ALIASES:-}" \
     ANNOTATIONS="${ANNOTATIONS}" \
     GITHUB_OUTPUT="${GITHUB_OUTPUT:-}" \
     REGISTRY_RETRY_ATTEMPTS=2 REGISTRY_RETRY_INITIAL_DELAY=1 REGISTRY_RETRY_MAX_DELAY=1 \
@@ -132,16 +133,31 @@ run_publish 'duplicate digest entry for amd64'
 # Tag guards.
 write_digests
 ANNOTATIONS=""
+MOVING_ALIASES=""
 TAGS="
 "
 run_publish 'no image tags were supplied'
 TAGS="registry.other/example:v1.2.3"
-run_publish 'first image tag does not belong to'
+run_publish 'image tag does not belong to'
 
-# Successful assembly keeps both tags and passes metadata annotations through
-# without adding a second index level prefix.
+# A moving alias that the caller did not declare is not quietly written as if it were
+# immutable. This is the exact regression the single-command assembly allowed: position in
+# the metadata output decided what the public name pointed at, and re-ordering that output
+# kept every assertion below green.
 TAGS="${version_tag}
 ${image}:latest"
+run_publish 'expected exactly one canonical tag, found 2'
+
+# Declaring the alias with the wrong name is a red too, and must not fall back to writing
+# both tags: a typo here would otherwise restore the old behaviour silently.
+MOVING_ALIASES="lates"
+run_publish 'moving alias was not produced by the metadata action'
+MOVING_ALIASES="${image}:latest"
+run_publish 'moving alias was not produced by the metadata action'
+
+# Successful assembly writes the immutable tag alone, passes metadata annotations through
+# without adding a second index level prefix, and reports the withheld alias as data.
+MOVING_ALIASES="latest"
 ANNOTATIONS="index:org.opencontainers.image.version=v1.2.3"
 rm -f -- "${docker_log}"
 run_publish ''
@@ -151,22 +167,48 @@ if grep -q -- '--annotation index:index:' "${docker_log}"; then
   exit 1
 fi
 grep -q -- "--tag ${version_tag}" "${docker_log}"
-grep -q -- "--tag ${image}:latest" "${docker_log}"
 grep -q -- "${image}@sha256:${amd64_digest}" "${docker_log}"
 grep -q -- "${image}@sha256:${arm64_digest}" "${docker_log}"
-# A single create call carrying both tags and both architecture sources.
+# The alias must not appear in the write at all, which is the point of the change.
+if grep -q -- "--tag ${image}:latest" "${docker_log}"; then
+  echo 'the moving alias must not be written before verification' >&2
+  exit 1
+fi
+# A single create call carrying the canonical tag and both architecture sources.
 [[ $(wc -l <"${docker_log}") == 1 ]]
 grep -q 'Published multi-platform index' "${test_root}/stderr"
 
-# The workflow verifies the reference this run published, so the canonical tag
-# must be exported as the step output rather than re-derived from its inputs.
+# The workflow verifies the reference this run published, so the canonical tag must be
+# exported as the step output rather than re-derived from its inputs, and the withheld
+# alias must come back as a full reference for the promotion step to consume.
 GITHUB_OUTPUT=${test_root}/github_output
 : >"${GITHUB_OUTPUT}"
 run_publish ''
-[[ $(<"${GITHUB_OUTPUT}") == "canonical_tag=${version_tag}" ]] || {
-  printf 'unexpected canonical_tag output: %s\n' "$(<"${GITHUB_OUTPUT}")" >&2
+expected_output=$(printf 'canonical_tag=%s\nmoving_aliases=%s\n' "${version_tag}" "${image}:latest")
+actual_output=$(<"${GITHUB_OUTPUT}")
+[[ ${actual_output} == "${expected_output}" ]] || {
+  printf 'unexpected step output:\n%s\n----\nexpected:\n%s\n' "${actual_output}" "${expected_output}" >&2
   exit 1
 }
 unset GITHUB_OUTPUT
 
-echo 'digest pairing, annotation prefix, tag, and canonical output cases passed'
+# A staging run has no alias at all: one canonical tag and empty output is the normal case,
+# not an error, so this must stay green without MOVING_ALIASES being set.
+write_digests
+MOVING_ALIASES=""
+TAGS="${image}:staging-v1.2.3-42"
+ANNOTATIONS=""
+rm -f -- "${docker_log}"
+GITHUB_OUTPUT=${test_root}/github_output2
+: >"${GITHUB_OUTPUT}"
+run_publish ''
+grep -q -- "--tag ${image}:staging-v1.2.3-42" "${docker_log}"
+actual_output=$(<"${GITHUB_OUTPUT}")
+expected_output=$(printf 'canonical_tag=%s\nmoving_aliases=\n' "${image}:staging-v1.2.3-42")
+[[ ${actual_output} == "${expected_output}" ]] || {
+  printf 'staging run must report an empty alias list, got: %s\n----\nexpected: %s\n' "${actual_output}" "${expected_output}" >&2
+  exit 1
+}
+unset GITHUB_OUTPUT
+
+echo 'digest pairing, annotation prefix, alias withholding, and canonical output cases passed'

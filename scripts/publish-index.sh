@@ -48,16 +48,47 @@ while IFS= read -r tag; do
 done <<<"${TAGS-}"
 ((${#tags[@]} > 0)) || die 'no image tags were supplied'
 
-# The metadata inputs list the immutable tag for this run first, so the first tag
-# is the one reference the caller should verify.
-first_tag=${tags[0]}
-[[ ${first_tag} == "${image_reference}:"* ]] \
-  || die "first image tag does not belong to ${image_reference}: ${first_tag}"
-
-args=()
-for tag in "${tags[@]}"; do
-  args+=(--tag "${tag}")
+# MOVING_ALIASES declares, as space-separated tag names, which of those tags are allowed to be
+# re-pointed later. Nothing here infers movability from tag order or from a `latest` prefix: order was
+# the defect. The metadata inputs happen to list the immutable tag first today, so a single write
+# carried both the version tag and `latest`, and the public name pointed at content no one had
+# verified yet.
+read -r -a aliases <<<"${MOVING_ALIASES-}"
+alias_refs=()
+# A bash array expands to one empty element under "${arr[@]-}" when it is empty, so the names are
+# filtered rather than trusted: an unset MOVING_ALIASES used to manufacture a `${image_reference}:`
+# alias out of nothing, and the run then failed for a reason that had nothing to do with its tags.
+for name in "${aliases[@]-}"; do
+  [[ -n ${name} ]] || continue
+  alias_refs+=("${image_reference}:${name}")
 done
+
+canonical_tags=()
+for tag in "${tags[@]}"; do
+  [[ ${tag} == "${image_reference}:"* ]] \
+    || die "image tag does not belong to ${image_reference}: ${tag}"
+  if [[ -n ${alias_refs[*]-} ]] && printf '%s\n' "${alias_refs[@]}" | grep -Fxq -- "${tag}"; then
+    continue
+  fi
+  canonical_tags+=("${tag}")
+done
+
+if ((${#alias_refs[@]} > 0)); then
+  for ref in "${alias_refs[@]}"; do
+    printf '%s\n' "${tags[@]}" | grep -Fxq -- "${ref}" \
+      || die "moving alias was not produced by the metadata action: ${ref}"
+  done
+fi
+
+# Exactly one immutable tag per run: the version tag, or the staging tag while a release is measured.
+# Two canonical tags means something movable was left undeclared, which is precisely how the alias
+# came to be published before verification; zero means every tag was declared movable. Either way
+# this is a red rather than a guess, and the caller could not say which name it verified.
+((${#canonical_tags[@]} == 1)) \
+  || die "expected exactly one canonical tag, found ${#canonical_tags[@]}: ${canonical_tags[*]-}"
+canonical_tag=${canonical_tags[0]}
+
+args=(--tag "${canonical_tag}")
 while IFS= read -r annotation; do
   # docker/metadata-action already prefixes each annotation with its level.
   [[ -z ${annotation} ]] || args+=(--annotation "${annotation}")
@@ -70,12 +101,20 @@ done
 
 retry_command 4 2 docker buildx imagetools create "${args[@]}" "${sources[@]}"
 
-log "Published multi-platform index ${first_tag}"
+log "Published multi-platform index ${canonical_tag}"
 # The assembled index carries each platform's child image manifest rather than
 # the per-architecture index digest reported here, so its completeness and
 # attestation pairing is verified through the tag by scripts/verify-published.sh.
 # The caller verifies the reference this run actually published instead of
 # re-deriving it from the metadata inputs.
+# Declared aliases are withheld here so that unverified content is reachable only under its immutable
+# name. scripts/promote-alias.sh points them at the digest the verifier reports, which is the gap this
+# pipeline did not have: the write and the check that authorises it used to be one command. There is
+# deliberately no readback of the digest here; the number that matters is the one taken after the
+# attestations and executables were checked, not the one taken immediately after the push.
 if [[ -n ${GITHUB_OUTPUT:-} ]]; then
-  printf 'canonical_tag=%s\n' "${first_tag}" >>"${GITHUB_OUTPUT}"
+  {
+    printf 'canonical_tag=%s\n' "${canonical_tag}"
+    printf 'moving_aliases=%s\n' "${alias_refs[*]-}"
+  } >>"${GITHUB_OUTPUT}"
 fi
