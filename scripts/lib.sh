@@ -425,6 +425,99 @@ publish_immutable_image_tag() {
   printf '%s@%s\n' "${target%:*}" "${existing}"
 }
 
+# Reads the state of one canonical tag without writing: <status>\t<held-by-abi-id>. `absent`
+# covers a name nothing holds, `occupied` a name that resolves to an index, and `unreachable`
+# anything the registry could not answer for, which is never reported as free. The holding
+# identity comes from the `io.rulego.abi.id` index annotation that publication already writes,
+# so no separate provenance channel is needed and no digest is compared, because the content of an
+# unpublished canonical tag does not exist yet to compare against.
+canonical_tag_probe() {
+  local target=${1:?canonical tag is required}
+  local status annotations held_by
+
+  # The digest itself is not compared: an unpublished canonical tag has no content of this
+  # lock's to compare against, so only its occupancy is of interest here.
+  status=0
+  image_reference_digest "${target}" >/dev/null || status=$?
+  case ${status} in
+    0) ;;
+    1)
+      printf 'absent\t\n'
+      return 0
+      ;;
+    *)
+      printf 'unreachable\t\n'
+      return 0
+      ;;
+  esac
+
+  if ! annotations=$(docker buildx imagetools inspect "${target}" \
+    --format '{{json .Manifest}}' | jq -c '.annotations // {}'); then
+    printf 'unreachable\t\n'
+    return 0
+  fi
+  if ! held_by=$(jq -er '."io.rulego.abi.id" // "unlabelled"' <<<"${annotations}"); then
+    printf 'unreachable\t\n'
+    return 0
+  fi
+  printf 'occupied\t%s\n' "${held_by}"
+}
+
+# Derives the canonical tag plan from rendered tags and a registry owner, as
+# <identity>\t<target> lines, in the order publication writes them. Publication builds the same
+# targets inline from the same rendered tags and the same owner, so the inputs are shared even
+# though this function has one caller; what the probe must not do is report on a different set of
+# names than the one publication writes, and `tests/canonical-tag-allocatability.sh` holds both
+# sides to that. The SDK is named by its identity, so it cannot collide with a different ABI; the
+# runtime hosts are named by the upstream release plus a host suffix, which is exactly why they
+# can collide and why they are probed one at a time.
+canonical_tag_plan() {
+  local tags=${1:?rendered tags are required}
+  local owner=${2:?registry owner is required}
+
+  jq -r --arg owner "${owner}" '
+    [ {identity: "plugin-sdk", target: ("ghcr.io/" + $owner + "/" + .sdk)} ] +
+    [ .runtime | to_entries[] |
+        {identity: ("runtime-" + .key), target: ("ghcr.io/" + $owner + "/" + .value)} ] |
+    .[] | [.identity, .target] | @tsv' <<<"${tags}"
+}
+
+# Classifies one canonical tag probe into a verdict, given the identity this lock claims and the
+# identity of the contract it replaced. It is a function rather than inline conditions so the
+# classification itself is testable offline without a registry.
+#
+# `superseded` is not a failure. A runtime canonical tag is named after the upstream release, so a
+# tag an earlier contract already claimed stays claimed forever; treating that as red would make
+# main permanently red and invite the gate to be weakened until it meant nothing, which is how a
+# check dies. It is reported instead, because it is the real blocker for a release and the
+# operator has to see which name causes it. A name held by an identity the lock does not account
+# for is unexplained, and an unprobed name is never treated as free.
+#
+# Publication is stricter than this by design and stays that way: it compares digests of built
+# content in one all-or-nothing gate, while a name cannot be compared to content that has not been
+# built yet. This function classifies names; it does not license a write.
+canonical_tag_verdict() {
+  local probe_status=${1:?probe status is required}
+  local held_by=${2:-}
+  local this_abi=${3:?this identity is required}
+  local previous_abi=${4:?predecessor identity is required}
+
+  case ${probe_status} in
+    absent) printf 'allocatable\n' ;;
+    occupied)
+      if [[ ${held_by} == "${this_abi}" ]]; then
+        printf 'republish\n'
+      elif [[ ${held_by} == "${previous_abi}" ]]; then
+        printf 'superseded\n'
+      else
+        printf 'collision\n'
+      fi
+      ;;
+    unreachable) printf 'unreachable\n' ;;
+    *) die "unknown canonical tag probe status: ${probe_status}" ;;
+  esac
+}
+
 # Probes every canonical target before any tag is written so one authorized
 # release either publishes all of its tags or none of them. A runtime canonical
 # tag is named after the host release alone, but its index annotations carry

@@ -26,6 +26,43 @@ jobs:
       - name: Run the offline test suite
         run: tests/run.sh
 
+  allocatability:
+    name: Probe canonical tag allocatability
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Check out repository
+        # actions/checkout v7.0.1
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      # Reads public manifests only, anonymously, and writes nothing: no packages token is needed
+      # and none is given. A name that has been occupied by a contract the lock does not account
+      # for fails here, on the pull request that introduces it, rather than at the publish that
+      # needs it. A name held by the superseded contract is reported and does not fail, because
+      # runtime canonical tags are named after the upstream release and would otherwise keep this
+      # job red forever.
+      - name: Probe every canonical tag without publishing
+        env:
+          # Under a pull_request event GITHUB_SHA names the automatic merge ref: that object exists
+          # on no branch, stops existing once the pull request merges, and is what actions/checkout
+          # actually builds here, so a record naming it points at a commit nobody can look up later.
+          # The head SHA is the reviewable object, which is what a record should cite. Under push
+          # this input is empty and the script falls back to GITHUB_SHA, which is a real branch
+          # commit in that context. Note this makes the record cite the head commit rather than the
+          # exact tree the job ran on, which is the right trade for a provenance field: the merge ref
+          # is unresolvable afterwards, and the lock identity the record is really about is carried
+          # separately as abi_id and lock_digest.
+          PLUGIN_ABI_PROBE_REVISION: ${{ github.event.pull_request.head.sha }}
+        run: scripts/probe-canonical-tags.sh --record tmp/canonical-tag-allocatability.json
+      - name: Upload the allocatability record
+        # actions/upload-artifact v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: canonical-tag-allocatability
+          path: tmp/canonical-tag-allocatability.json
+          if-no-files-found: error
+
   contract:
     name: Validate Plugin ABI contract
     runs-on: ubuntu-24.04

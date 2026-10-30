@@ -18,7 +18,7 @@ usage: scripts/plugin-abi.sh validate <--candidate|--release>
        scripts/plugin-abi.sh render compatibility-sdk <amd64|arm64>
        scripts/plugin-abi.sh render size-limit <amd64|arm64> [host-id]
        scripts/plugin-abi.sh render metadata <plugin-sdk|plugin-runtime> [amd64|arm64] [host-id]
-       scripts/plugin-abi.sh render tags
+       scripts/plugin-abi.sh render tags [--candidate|--release]
 EOF
   exit 2
 }
@@ -331,7 +331,11 @@ render_metadata() {
 }
 
 render_tags() {
-  validate_lock --release
+  # Release stays the default because publication must not claim tags from a lock that is
+  # still measuring. The candidate mode exists for the allocatability dry-run, which has to
+  # ask the same question about names while `release.state` is measurement, that is before
+  # any of this is publishable at all.
+  validate_lock "${1:---release}"
   jq -c '. as $root | {
     sdk: (.release.sdk_image + ":" + .abi_id),
     runtime: (reduce .abi.build.hosts[] as $host ({};
@@ -371,7 +375,10 @@ case ${1:-} in
         fi
         ;;
       metadata) [[ $# == 3 || $# == 4 || $# == 5 ]] || usage; validate_lock --candidate; render_metadata "$3" "${4:-}" "${5:-plugin}" ;;
-      tags) [[ $# == 2 ]] || usage; render_tags ;;
+      tags)
+        [[ $# == 2 || $# == 3 ]] || usage
+        render_tags "${3:---release}"
+        ;;
       *) usage ;;
     esac
     ;;
