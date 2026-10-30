@@ -12,6 +12,7 @@ for test_script in \
   "${script_dir}/repository-contract.sh" \
   "${script_dir}/plugin-abi-lock.sh" \
   "${script_dir}/plugin-abi-identity-scope.sh" \
+  "${script_dir}/plugin-abi-identity-vectors.sh" \
   "${script_dir}/plugin-abi-drivers.sh" \
   "${script_dir}/plugin-build-helper.sh" \
   "${script_dir}/plugin-image-contract.sh" \
