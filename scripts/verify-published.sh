@@ -33,7 +33,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-if image_manifest_digest "${image_reference}" true >/dev/null; then
+if verified_digest=$(image_manifest_digest "${image_reference}" true); then
   :
 else
   status=$?
@@ -119,5 +119,13 @@ for architecture in amd64 arm64; do
     || die "published image checksum mismatch for ${architecture}: expected ${expected_sha}, got ${actual_sha}"
   log "Verified published image executable SHA-256 for ${architecture}: ${actual_sha}"
 done
+
+# Written last, on purpose. This line is what authorises scripts/promote-alias.sh to move a public
+# name, so emitting it before the attestations or the executables had been checked would hand a
+# licence to a run that was about to fail. A verification that dies partway therefore leaves no
+# output at all, and the promotion step receives an empty digest it cannot act on.
+if [[ -n ${GITHUB_OUTPUT:-} ]]; then
+  printf 'verified_digest=%s\n' "${verified_digest}" >>"${GITHUB_OUTPUT}"
+fi
 
 log "Verified published multi-platform image: ${image_reference}"

@@ -120,6 +120,8 @@ make_attestation_dir without-sbom provenance provenance,sbom
 run_case() {
   local mode=$1 index_file=$2 attestation_dir=$3 binary_content=$4 expected=$5
   local status=0
+  local output_file=${test_root}/${mode}.github_output
+  : >"${output_file}"
 
   set +e
   (
@@ -128,12 +130,36 @@ run_case() {
       MOCK_INDEX_FILE="${index_file}" \
       MOCK_ATTESTATION_DIR="${test_root}/attest/${attestation_dir}" \
       MOCK_BINARY_CONTENT="${binary_content}" \
+      GITHUB_OUTPUT="${output_file}" \
       REGISTRY_RETRY_ATTEMPTS=2 REGISTRY_RETRY_INITIAL_DELAY=1 \
       REGISTRY_RETRY_MAX_DELAY=1 \
       scripts/verify-published.sh registry.invalid/example:test
   ) >"${test_root}/${mode}.stdout" 2>"${test_root}/${mode}.stderr"
   status=$?
   set -e
+
+  # The output file is the licence scripts/promote-alias.sh needs to move a public name, so every
+  # case below asserts what it holds, not only whether the run went red: a failing verification that
+  # still reported a digest would authorise the promotion it exists to prevent.
+  if [[ -z ${expected} ]]; then
+    grep -q "^verified_digest=" "${output_file}" || {
+      printf 'a passing verification must report the digest it verified\n' >&2
+      exit 1
+    }
+    # The reported digest must be the one the index actually carried, so a promotion cannot be
+    # authorised by a value the script never looked at.
+    reported=$(sed 's/^verified_digest=//' "${output_file}")
+    expected_digest=$(jq -er .digest "${index_file}")
+    [[ ${reported} == "${expected_digest}" ]] || {
+      printf 'verified_digest=%s but the index under test holds %s\n' "${reported}" "${expected_digest}" >&2
+      exit 1
+    }
+  else
+    [[ ! -s ${output_file} ]] || {
+      printf 'a failing verification must authorise nothing, got: %s\n' "$(<"${output_file}")" >&2
+      exit 1
+    }
+  fi
 
   if [[ -z ${expected} ]]; then
     [[ $status -eq 0 ]] || {
