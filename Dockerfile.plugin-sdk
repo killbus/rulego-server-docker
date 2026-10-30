@@ -31,6 +31,7 @@ RUN set -eu; \
     printf '%s\n' "${linker_output}" | grep -F "${LINKER_VERSION}"; \
     test "sha256:$(sha256sum /abi-manifest.json | awk '{print $1}')" = "${LOCK_DIGEST}"; \
     cmp /abi-manifest.json "${ABI_MANIFEST_PATH}"; \
+    date +%s > /opt/rulego/buildclock; \
     rm -rf "${home}"
 
 WORKDIR /workspace
