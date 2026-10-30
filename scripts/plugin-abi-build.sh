@@ -89,6 +89,42 @@ inspect_native() {
   ' "${output}" >/dev/null || die "invalid native image index: ${reference}"
 }
 
+# Rebuild one image from the same staged context and report the linux/<arch>
+# child digest of the result. --no-cache is not an optimization: measured on
+# buildkit v0.33.1, a second build inside one builder replays the cached RUN
+# layer without re-running it, so a warm recheck compares the same bytes and
+# passes even when the recipe is unpinned. Only the image child is compared,
+# because the attestation member carries the invocation identity and moves on
+# every build by design.
+reproduce_recheck() {
+  local repository=$1 variant=$2 host_id=$3 dockerfile=$4 context_dir=$5
+  shift 5
+  # The label is derived from the repository rather than passed in, because a
+  # mis-ordered argument here writes log and metadata paths outside ${work}:
+  # the first version of this helper took a label, a caller passed the
+  # repository, and the redirect silently landed on localhost:5000/. A value
+  # that cannot be supplied wrongly is the fix, not a test for the mistake.
+  local label=${repository##*/}
+  local recheck=${repository}:recheck
+  # Labels are recomputed for this variant instead of reusing whatever the
+  # caller left in IMAGE_LABELS: they live in the image config, so inheriting
+  # them by accident would make a correctly reproducing recipe look
+  # irreproducible.
+  label_args "${variant}" "${host_id}"
+  env SOURCE_DATE_EPOCH="${reproducible_epoch}" \
+    docker buildx build --no-cache --file "${dockerfile}" --platform "${platform}" \
+    "$@" "${IMAGE_LABELS[@]}" --provenance=mode=max --sbom=true \
+    --metadata-file "${work}/${label}-recheck-build.json" \
+    --output "type=registry,name=${recheck}" "${context_dir}" \
+    >"${work}/${label}-recheck-build.log" 2>&1 ||
+    { tail -n 25 "${work}/${label}-recheck-build.log" >&2; die "${label} reproducibility recheck failed to build"; }
+  inspect_native "${recheck}" "${work}/${label}-recheck-index.json"
+  jq -er --arg arch "${arch}" \
+    '.manifests[] | select(.platform.os=="linux" and .platform.architecture==$arch) | .digest' \
+    "${work}/${label}-recheck-index.json"
+}
+
+
 sdk_repository=localhost:5000/plugin-sdk-${arch}
 sdk_staging=''
 if [[ ${stage} == true ]]; then
@@ -112,6 +148,20 @@ inspect_native "${sdk_repository}:candidate" "${work}/sdk-index.json"
 sdk_index=$(jq -er '.digest' "${work}/sdk-index.json")
 sdk_child=$(jq -er --arg arch "${arch}" '.manifests[] | select(.platform.os=="linux" and .platform.architecture==$arch) | .digest' "${work}/sdk-index.json")
 sdk_ref=${sdk_repository}@${sdk_child}
+
+# The identity claim of this pipeline is that the SDK child digest is a
+# function of the lock alone. It is checked here, on the infrastructure that
+# produces it, and before the image is consumed or staged: a recipe that
+# re-opened the transparency log or let a verifier write dated telemetry into
+# the image used to pass every offline guard and only move the digest on a
+# real runner, so the gate that catches that class must run on that class of
+# machine. A mismatch stops the job before anything reaches GHCR.
+sdk_recheck=$(reproduce_recheck "${sdk_repository}" plugin-sdk '' \
+  "${repository_root}/Dockerfile.plugin-sdk" "${context}" \
+  --build-arg "SDK_BASE=${sdk_base}" --build-arg "ABI_MANIFEST_PATH=${manifest_path}")
+[[ ${sdk_recheck} == "${sdk_child}" ]] ||
+  die "${arch} SDK child digest is not reproducible: ${sdk_child} then ${sdk_recheck}"
+log "${arch} SDK child digest reproduced: ${sdk_child}"
 
 mkdir -p "${work}/sdk-output"
 chmod 0777 "${work}/sdk-output"
@@ -226,6 +276,16 @@ while IFS=$'\t' read -r host_id tag_suffix; do
     '.manifests[] | select(.platform.os=="linux" and .platform.architecture==$arch) | .digest' \
     "${work}/runtime-index-${host_id}.json")
   runtime_ref=${runtime_repository}@${runtime_child}
+
+  # Same claim for the host image: the host rootfs is produced by the SDK
+  # builder container, so a payload that depends on when it ran would otherwise
+  # reach publication carrying the clock.
+  runtime_recheck=$(reproduce_recheck "${runtime_repository}" plugin-runtime "${host_id}" \
+    "${repository_root}/Dockerfile.plugin-runtime" "${runtime_context}" \
+    --build-arg "RUNTIME_BASE=${runtime_base}")
+  [[ ${runtime_recheck} == "${runtime_child}" ]] ||
+    die "${arch} ${host_id} runtime child digest is not reproducible: ${runtime_child} then ${runtime_recheck}"
+  log "${arch} ${host_id} runtime child digest reproduced: ${runtime_child}"
 
   "${script_dir}/verify-plugin-runtime.sh" filesystem "${runtime_ref}" "${arch}" >"${work}/runtime-uncompressed-${host_id}.txt"
   "${script_dir}/verify-plugin-runtime.sh" load "${runtime_ref}" "${arch}" "${work}/sdk-output/sdk-probe-${arch}.so"
