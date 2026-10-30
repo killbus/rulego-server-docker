@@ -88,4 +88,36 @@ first_write_line=$(grep -n 'publish_immutable_image_tag ' scripts/plugin-abi-pub
   exit 1
 }
 
+# Reproducibility wiring: the runtime context must be stamped and probed before
+# its image is built, and both image builds must carry the locked epoch, or the
+# child digest silently returns to the build clock and every gate rejection
+# fires for the trivial known reason.
+(( $(grep -Fc 'stamp_reproducible_tree "${runtime_context}"' "${build}") == 1 )) || {
+  echo 'the runtime context must be stamped exactly once before it is built' >&2
+  exit 1
+}
+(( $(grep -Fc 'assert_reproducible_tree "${runtime_context}"' "${build}") == 1 )) || {
+  echo 'the runtime context must be probed exactly once before it is built' >&2
+  exit 1
+}
+runtime_stamp_line=$(grep -n 'stamp_reproducible_tree "${runtime_context}"' "${build}" | cut -d: -f1)
+runtime_assert_line=$(grep -n 'assert_reproducible_tree "${runtime_context}"' "${build}" | cut -d: -f1)
+((runtime_stamp_line < runtime_assert_line && runtime_assert_line < runtime_line)) || {
+  echo 'the runtime context must be stamped and probed before the runtime image is built' >&2
+  exit 1
+}
+(( $(grep -Fc 'env SOURCE_DATE_EPOCH="${reproducible_epoch}"' "${build}") == 2 )) || {
+  echo 'every Plugin ABI image build must pin SOURCE_DATE_EPOCH to the locked epoch' >&2
+  exit 1
+}
+prepare_stamp_line=$(grep -n 'stamp_reproducible_tree "${stage_root}"' scripts/prepare-plugin-abi.sh | cut -d: -f1)
+prepare_assert_line=$(grep -n 'assert_reproducible_tree "${stage_root}"' scripts/prepare-plugin-abi.sh | cut -d: -f1)
+prepare_move_line=$(grep -n 'mv -- "${context}" "${destination}"' scripts/prepare-plugin-abi.sh | cut -d: -f1)
+((prepare_stamp_line < prepare_assert_line && prepare_assert_line < prepare_move_line)) || {
+  echo 'the prepared context must be stamped and probed before it reaches the build root' >&2
+  exit 1
+}
+# The nested-destination rule for the recipes is asserted once, in
+# tests/plugin-image-contract.sh.
+
 echo 'Plugin ABI driver guards and digest flow passed'

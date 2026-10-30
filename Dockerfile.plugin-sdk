@@ -5,14 +5,13 @@ FROM ${SDK_BASE}
 ARG TARGETARCH
 ARG ABI_MANIFEST_PATH
 
-COPY source/ /opt/rulego/source/
-COPY --chown=65532:65532 gomodcache/ /go/pkg/mod/
-COPY manifest/module-list.txt /opt/rulego/module-list.txt
-COPY manifest/host-modules.tsv /opt/rulego/host-modules.tsv
-COPY manifest/build.env /opt/rulego/build.env
-COPY manifest/plugin-abi.json /abi-manifest.json
-COPY rulego-plugin-build /usr/local/bin/rulego-plugin-build
-COPY build-plugin-host /usr/local/bin/build-plugin-host
+# Every payload is staged at its image-relative path and copied with the
+# filesystem root as the destination: buildkit re-stamps synthetic parent
+# directories, and any COPY destination below /, to the build clock, so a
+# directory-form COPY into / plus a stamped context is what keeps the child
+# digest independent of when the image is built.
+COPY --chown=65532:65532 gomodcache-root/ /
+COPY --chown=0:0 stage-root/ /
 
 RUN set -eu; \
     . /opt/rulego/build.env; \
@@ -23,8 +22,7 @@ RUN set -eu; \
     printf '%s\n' "${linker_output}" | grep -F "${LINKER_IDENTITY}"; \
     printf '%s\n' "${linker_output}" | grep -F "${LINKER_VERSION}"; \
     test "sha256:$(sha256sum /abi-manifest.json | awk '{print $1}')" = "${LOCK_DIGEST}"; \
-    mkdir -p "$(dirname "${ABI_MANIFEST_PATH}")"; \
-    cp /abi-manifest.json "${ABI_MANIFEST_PATH}"
+    cmp /abi-manifest.json "${ABI_MANIFEST_PATH}"
 
 WORKDIR /workspace
 USER 65532:65532

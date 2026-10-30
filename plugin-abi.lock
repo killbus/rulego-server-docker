@@ -83,6 +83,7 @@
     "sdk_image": "rulego-plugin-sdk",
     "runtime_image": "rulego-server",
     "manifest_path": "/usr/share/rulego/plugin-abi.json",
+    "reproducible_epoch": 1700000000,
     "ci": {"runners": {"amd64": "ubuntu-24.04", "arm64": "ubuntu-24.04-arm"}},
     "editor_payload": {
       "repository": "https://github.com/rulego/rulego",

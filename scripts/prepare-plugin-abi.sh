@@ -21,6 +21,8 @@ revision=$(jq -er '.rulego_server.revision' <<<"${build_json}")
 release_version=$(jq -er '.rulego_server.release_version' <<<"${build_json}")
 repository=$(jq -er '.rulego_server.repository' <<<"${build_json}")
 go_version=$(jq -er '.go.version' <<<"${build_json}")
+reproducible_epoch=$(jq -er '.reproducible_epoch' <<<"${build_json}")
+manifest_path=$(jq -er '.manifest_path' <<<"${build_json}")
 go_mod_sha=$(jq -er '.rulego_server.go_mod_sha256' <<<"${build_json}")
 go_sum_sha=$(jq -er '.rulego_server.go_sum_sha256' <<<"${build_json}")
 list_sha=$(jq -er '.module_graph.list_sha256' <<<"${build_json}")
@@ -41,7 +43,17 @@ cleanup() {
 trap cleanup EXIT
 checkout=${stage}/checkout
 context=${stage}/context
-mkdir -p "${context}/source" "${context}/manifest" "${context}/gomodcache" "${stage}/gocache" "${stage}/home"
+# The two staged roots are the only context entries any Plugin ABI image
+# copies. Each one holds its payload at the image-relative path with the
+# filesystem root as the COPY destination, which is the shape buildkit can
+# reproduce: a directory-form COPY into / with no synthetic parent directory.
+stage_root=${context}/stage-root
+gomodcache_root=${context}/gomodcache-root
+sdk_source=${stage_root}/opt/rulego/source
+abi_relative=${manifest_path#/}
+mkdir -p "${sdk_source}" "${context}/manifest" "${gomodcache_root}/go/pkg/mod" \
+  "${stage_root}/usr/local/bin" "${stage_root}/$(dirname -- "${abi_relative}")" \
+  "${stage}/gocache" "${stage}/home"
 editor_fetcher=${PLUGIN_ABI_EDITOR_FETCHER:-${script_dir}/fetch-plugin-editor.sh}
 "${editor_fetcher}" "${context}/runtime/editor"
 
@@ -59,8 +71,8 @@ tag_revision=$(git -C "${checkout}" rev-parse "refs/tags/${release_version}^{com
 [[ ${tag_revision} == "${revision}" ]] \
   || die "RuleGo release/source mismatch: ${release_version} peels to ${tag_revision}, expected ${revision}"
 
-tar -C "${checkout}" --exclude=.git -cf - . | tar -C "${context}/source" -xf -
-server_dir=${context}/source/server
+tar -C "${checkout}" --exclude=.git -cf - . | tar -C "${sdk_source}" -xf -
+server_dir=${sdk_source}/server
 [[ -f ${server_dir}/go.mod && -f ${server_dir}/go.sum ]] || die 'RuleGo server module is missing'
 [[ $(sha256_file "${server_dir}/go.mod") == "${go_mod_sha}" ]] || die 'RuleGo server go.mod digest mismatch'
 [[ $(sha256_file "${server_dir}/go.sum") == "${go_sum_sha}" ]] || die 'RuleGo server go.sum digest mismatch'
@@ -71,7 +83,7 @@ cp -- "${server_dir}/go.mod" "${server_dir}/go.sum" "${resolver_dir}/"
 go_env=(
   "HOME=${stage}/home"
   "TMPDIR=${stage}"
-  "GOMODCACHE=${context}/gomodcache"
+  "GOMODCACHE=${gomodcache_root}/go/pkg/mod"
   "GOCACHE=${stage}/gocache"
   "CGO_ENABLED=${cgo_enabled}"
   "GOOS=${goos}"
@@ -130,8 +142,28 @@ run_go "${resolver_dir}" list -m -f "${module_identity_template}" all \
 "${script_dir}/plugin-abi.sh" render sdk-env "${arch}" >"${context}/manifest/build.env"
 printf '%s\n' "${revision}" >"${context}/manifest/source-revision"
 printf '%s\n' "${build_json}" >"${context}/manifest/build-${arch}.json"
-install -m 0755 "${script_dir}/rulego-plugin-build" "${context}/rulego-plugin-build"
-install -m 0755 "${script_dir}/build-plugin-host" "${context}/build-plugin-host"
+
+# Stage the image payloads at their image-relative paths. The manifest
+# directory stays outside the staged roots because only the build driver reads
+# it and no image copies it.
+abi_manifest=${stage_root}/${abi_relative}
+cp -- "${context}/manifest/module-list.txt" "${stage_root}/opt/rulego/module-list.txt"
+cp -- "${context}/manifest/host-modules.tsv" "${stage_root}/opt/rulego/host-modules.tsv"
+cp -- "${context}/manifest/build.env" "${stage_root}/opt/rulego/build.env"
+cp -- "${context}/manifest/plugin-abi.json" "${abi_manifest}"
+cp -- "${abi_manifest}" "${stage_root}/abi-manifest.json"
+install -m 0755 "${script_dir}/rulego-plugin-build" "${stage_root}/usr/local/bin/rulego-plugin-build"
+install -m 0755 "${script_dir}/build-plugin-host" "${stage_root}/usr/local/bin/build-plugin-host"
+
+# Single source boundary for timestamps: git checkout, the module downloader
+# and the editor fetcher all write wall-clock mtimes, and buildkit copies them
+# into the layer tar. Stamping here is what makes a rebuild of unchanged
+# content produce the same child digest, so the probe below must never be
+# dropped or reordered before the image build.
+stamp_reproducible_tree "${stage_root}" "${reproducible_epoch}"
+stamp_reproducible_tree "${gomodcache_root}" "${reproducible_epoch}"
+assert_reproducible_tree "${stage_root}" "${reproducible_epoch}"
+assert_reproducible_tree "${gomodcache_root}" "${reproducible_epoch}"
 
 destination=${build_root}/plugin-abi
 rm -rf -- "${destination}"

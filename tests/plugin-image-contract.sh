@@ -12,15 +12,24 @@ assert_contains() {
 }
 
 assert_contains Dockerfile.plugin-sdk 'FROM ${SDK_BASE}'
-assert_contains Dockerfile.plugin-sdk 'COPY source/ /opt/rulego/source/'
-assert_contains Dockerfile.plugin-sdk 'COPY --chown=65532:65532 gomodcache/ /go/pkg/mod/'
+assert_contains Dockerfile.plugin-sdk 'COPY --chown=65532:65532 gomodcache-root/ /'
+assert_contains Dockerfile.plugin-sdk 'COPY --chown=0:0 stage-root/ /'
 assert_contains Dockerfile.plugin-sdk 'ENTRYPOINT ["/usr/local/bin/rulego-plugin-build"]'
 if grep -Fq 'runtime/editor' Dockerfile.plugin-sdk; then
   echo 'plugin SDK bundles a runtime-only editor payload' >&2
   exit 1
 fi
+# Only the two staged roots may reach the SDK, each copied to the filesystem
+# root: a directory-form COPY into a nested destination re-stamps its parent
+# directories with the build clock, which would make the child digest depend
+# on when the image is built.
+if grep -Eq '^COPY( --chown=[^ ]+)? [^ ]+ /[^/]' Dockerfile.plugin-sdk Dockerfile.plugin-runtime; then
+  echo 'Plugin ABI recipe copies to a nested destination instead of /' >&2
+  exit 1
+fi
 assert_contains Dockerfile.plugin-runtime 'FROM ${RUNTIME_BASE}'
-assert_contains Dockerfile.plugin-runtime 'COPY --chown=65532:65532 rootfs/ /app/'
+assert_contains Dockerfile.plugin-runtime 'COPY --chown=0:0 abi-root/ /'
+assert_contains Dockerfile.plugin-runtime 'COPY --chown=65532:65532 app-root/ /'
 assert_contains Dockerfile.plugin-runtime 'USER 65532:65532'
 assert_contains Dockerfile.plugin-runtime 'VOLUME ["/app/data"]'
 assert_contains Dockerfile.plugin-runtime 'ENTRYPOINT ["/app/rulego-server"]'

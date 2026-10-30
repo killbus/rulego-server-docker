@@ -164,6 +164,51 @@ sha256_file() {
   sha256sum "$1" | awk '{print $1}'
 }
 
+# Pin every context entry to the locked reproducible epoch and to canonical
+# modes. buildkit copies mtime from the build context for file entries and for
+# the destination directory of a directory-form COPY, and it stamps synthetic
+# parent directories with the build clock, so an unpinned context makes the
+# child image digest depend on wall time. Modes come from the runner's umask
+# unless they are set here, which would make the digest depend on who built
+# the image. Stamping happens once, at the single boundary where build inputs
+# enter the context.
+stamp_reproducible_tree() {
+  local root=${1:?context tree is required}
+  local epoch=${2:?reproducible epoch is required}
+  [[ ${epoch} =~ ^[0-9]+$ ]] || die "reproducible epoch must be an integer: ${epoch}"
+  [[ -d ${root} ]] || die "context tree is missing: ${root}"
+  find "${root}" -depth -exec touch -h -a -m -d "@${epoch}" {} +
+  find "${root}" -type f -perm /111 -exec chmod 0755 {} +
+  find "${root}" -type f ! -perm /111 -exec chmod 0644 {} +
+  find "${root}" -type d -exec chmod 0755 {} +
+}
+
+# Fail closed if any context entry carries a time other than the locked epoch
+# or a mode other than the canonical ones. Without this probe, a skipped or
+# reordered stamp silently returns the build-time nondeterminism that makes
+# every gate rejection ambiguous.
+assert_reproducible_tree() {
+  local root=${1:?context tree is required}
+  local epoch=${2:?reproducible epoch is required}
+  [[ ${epoch} =~ ^[0-9]+$ ]] || die "reproducible epoch must be an integer: ${epoch}"
+  [[ -d ${root} ]] || die "context tree is missing: ${root}"
+
+  # %T@ prints seconds with a fractional part, so the comparison is numeric and
+  # any sub-second drift fails as well. Symlink modes are not normalizable and
+  # are therefore not asserted.
+  local reason
+  reason=$(
+    LC_ALL=C find "${root}" -printf '%T@ %m %y %p\n' |
+      awk -v epoch="${epoch}" '
+        function bad(why) { sub(/^[^ ]* [^ ]* [^ ]* /, ""); printf "%s: %s\n", why, $0; exit }
+        ($1 + 0) != epoch { bad("mtime is not the locked epoch " epoch) }
+        $3 == "d" && $2 != "755" { bad("directory mode is not 0755") }
+        $3 == "f" && $2 != "644" && $2 != "755" { bad("file mode is neither 0644 nor 0755") }
+      '
+  ) || die "build context tree cannot be inspected: ${root}"
+  [[ -z ${reason} ]] || die "unreproducible build context entry; ${reason}"
+}
+
 assert_elf_glibc_max() {
   local elf=${1:?ELF path is required}
   local maximum_allowed=${2:?maximum GLIBC version is required}

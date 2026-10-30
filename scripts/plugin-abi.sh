@@ -126,7 +126,8 @@ validate_lock() {
     (.compatibility.previous_sdk.children |
       (keys_unsorted | sort) == ([$root.abi.go.targets[].goarch] | sort)) and
     ([.compatibility.previous_sdk.children[] | digest] | all) and
-    (.release | exact_keys(["state", "sdk_image", "runtime_image", "manifest_path", "ci", "editor_payload", "size_limits"])) and
+    (.release | exact_keys(["state", "sdk_image", "runtime_image", "manifest_path", "reproducible_epoch", "ci", "editor_payload", "size_limits"])) and
+    (.release.reproducible_epoch | type == "number" and . == floor and . >= 0) and
     (.release.state == "measurement" or .release.state == "ready") and
     ([.release.sdk_image, .release.runtime_image] | all(test("^[a-z0-9]+([._-][a-z0-9]+)*$"))) and
     (.release.manifest_path | startswith("/") and endswith(".json")) and
@@ -186,6 +187,7 @@ render_ci() {
     server_release: .abi.rulego_server.release_version,
     server_revision: .abi.rulego_server.revision,
     manifest_path: .release.manifest_path, release_state: .release.state,
+    reproducible_epoch: .release.reproducible_epoch,
     sdk_image: .release.sdk_image, runtime_image: .release.runtime_image,
     hosts: .abi.build.hosts,
     matrix: {include: [.abi.go.targets[] as $target | {
@@ -209,6 +211,7 @@ render_build() {
     {
       abi_id, lock_digest: $lock_digest,
       manifest_path: .release.manifest_path,
+      reproducible_epoch: .release.reproducible_epoch,
       go: (.abi.go | del(.targets)), target: $target,
       native: (.abi.native | del(.toolchains)), toolchain: $toolchain,
       rulego_server: .abi.rulego_server, rulego_core: .abi.rulego_core,

@@ -16,6 +16,10 @@ printf 'module github.com/rulego/rulego/server\n\ngo 1.25.0\n' >"${test_root}/so
 : >"${test_root}/source/server/go.sum"
 printf 'config\n' >"${test_root}/source/server/config.conf"
 printf '{}\n' >"${test_root}/source/server/node_pool.json"
+# The build driver copies the probe plugin out of the source tree, so the fake
+# source has to carry it for the context-path check below to mean anything.
+mkdir -p "${test_root}/source/testdata/plugin"
+printf 'package plugin\n' >"${test_root}/source/testdata/plugin/plugin.go"
 
 core_version=$(jq -r '.abi.rulego_core.version' plugin-abi.lock)
 revision=$(jq -r '.abi.rulego_server.revision' plugin-abi.lock)
@@ -106,7 +110,7 @@ run_prepare() {
   env \
     PATH="${test_root}/bin:${PATH}" \
     PLUGIN_ABI_LOCK="${RUN_LOCK:-${test_root}/lock.json}" \
-    PLUGIN_ABI_BUILD_ROOT="${test_root}/build" \
+    PLUGIN_ABI_BUILD_ROOT="${RUN_BUILD_ROOT:-${test_root}/build}" \
     PLUGIN_ABI_TMP_ROOT="${test_root}" \
     PLUGIN_ABI_EDITOR_FETCHER="${test_root}/bin/fetch-editor" \
     FAKE_EDITOR_SOURCE="${test_root}/editor" \
@@ -118,7 +122,7 @@ run_prepare() {
 
 run_prepare >/dev/null
 output=${test_root}/build/plugin-abi
-[[ -f ${output}/source/server/go.mod ]]
+[[ -f ${output}/stage-root/opt/rulego/source/server/go.mod ]]
 [[ -f ${test_root}/resolver-go.sum-after-download ]]
 grep -Fqx 'resolver-only mutation' "${test_root}/resolver-go.sum-after-download"
 resolver_path=$(<"${test_root}/resolver-path")
@@ -127,17 +131,54 @@ resolver_path=$(<"${test_root}/resolver-path")
 if grep -Fvxq -- "${resolver_path}" "${test_root}/module-command-paths"; then
   exit 1
 fi
-cmp -s "${test_root}/source/server/go.mod" "${output}/source/server/go.mod"
-cmp -s "${test_root}/source/server/go.sum" "${output}/source/server/go.sum"
-[[ $(sha256sum "${output}/source/server/go.mod" | awk '{print $1}') == \
+cmp -s "${test_root}/source/server/go.mod" "${output}/stage-root/opt/rulego/source/server/go.mod"
+cmp -s "${test_root}/source/server/go.sum" "${output}/stage-root/opt/rulego/source/server/go.sum"
+[[ $(sha256sum "${output}/stage-root/opt/rulego/source/server/go.mod" | awk '{print $1}') == \
   $(jq -r '.abi.rulego_server.go_mod_sha256' "${test_root}/lock.json") ]]
-[[ $(sha256sum "${output}/source/server/go.sum" | awk '{print $1}') == \
+[[ $(sha256sum "${output}/stage-root/opt/rulego/source/server/go.sum" | awk '{print $1}') == \
   $(jq -r '.abi.rulego_server.go_sum_sha256' "${test_root}/lock.json") ]]
 [[ -f ${output}/manifest/plugin-abi.json ]]
 [[ -f ${output}/manifest/module-list.txt ]]
 [[ -f ${output}/manifest/host-modules.tsv ]]
 [[ -f ${output}/runtime/editor/index.html ]]
-[[ -x ${output}/rulego-plugin-build && -x ${output}/build-plugin-host ]]
+[[ -x ${output}/stage-root/usr/local/bin/rulego-plugin-build ]]
+[[ -x ${output}/stage-root/usr/local/bin/build-plugin-host ]]
+[[ -f ${output}/stage-root/abi-manifest.json ]]
+[[ -f ${output}/stage-root/usr/share/rulego/plugin-abi.json ]]
+cmp -s "${output}/stage-root/abi-manifest.json" "${output}/stage-root/usr/share/rulego/plugin-abi.json"
+cmp -s "${output}/manifest/plugin-abi.json" "${output}/stage-root/usr/share/rulego/plugin-abi.json"
+# The staged roots are the reproducibility boundary: every entry, including the
+# directories that git checkout and the editor fetcher create, must carry the
+# locked epoch and canonical modes rather than the state of whoever ran the
+# preparation. assert_staged is the shipped probe, not a copy of its logic.
+epoch=$(jq -r '.release.reproducible_epoch' "${test_root}/lock.json")
+assert_staged() {
+  local root=$1
+  (
+    # shellcheck source=scripts/lib.sh
+    source scripts/lib.sh
+    assert_reproducible_tree "${root}" "${epoch}"
+  )
+}
+for staged in "${output}/stage-root" "${output}/gomodcache-root"; do
+  assert_staged "${staged}"
+done
+[[ -d ${output}/gomodcache-root/go/pkg/mod ]]
+
+# The build driver only runs inside GitHub Actions, so nothing else proves that
+# the context paths it reads exist. Resolving them here turns a layout rename in
+# one script into a local failure instead of a native job that dies on cp.
+driver=scripts/plugin-abi-build.sh
+while IFS= read -r context_path; do
+  [[ -e ${output}/${context_path} ]] || {
+    printf 'build driver reads a context path that preparation does not produce: %s\n' \
+      "${context_path}" >&2
+    exit 1
+  }
+done < <(
+  grep -o '\${context}/[A-Za-z0-9._/-]*' "${driver}" |
+    sed 's|^\${context}/||' | LC_ALL=C sort -u
+)
 grep -Fxq 'HOST_ID=plugin' "${output}/manifest/build.env"
 grep -Fxq "HOST_TAGS=''" "${output}/manifest/build.env"
 jq -e '.abi.build.hosts == [
@@ -181,5 +222,48 @@ bad_id="abi-$(jq -S -c '.abi' "${test_root}/bad-stale.json" | sha256sum | awk '{
 jq --arg id "${bad_id}" '.abi_id = $id' "${test_root}/bad-stale.json" >"${test_root}/bad.json"
 run_bad_lock() { RUN_LOCK="${test_root}/bad.json" run_prepare; }
 expect_atomic_failure 'module-graph mismatch' run_bad_lock
+
+# Two preparations of the same lock must yield byte-identical context
+# metadata. The fake source tree is restamped and rechmodded between the runs,
+# because the fetch stub preserves both: without that stimulus the two runs
+# would agree for the wrong reason, the same wall-clock second hiding a missing
+# normalizer. This is the check that the reproducibility boundary holds; if it
+# regresses, every rebuild moves the child digest and the canonical tag probe
+# rejects its own re-run.
+context_digest() {
+  local root=${1:?context root is required}
+  LC_ALL=C tar -cf - --sort=name --numeric-owner --owner=0 --group=0 --format=gnu \
+    -C "${root}" . | sha256sum | awk '{print $1}'
+}
+
+restamp_source() {
+  local epoch=$1 mode=$2
+  find "${test_root}/source" -depth -exec touch -h -a -m -d "@${epoch}" {} +
+  find "${test_root}/source" -type f -exec chmod "${mode}" {} +
+  find "${test_root}/editor" -depth -exec touch -h -a -m -d "@${epoch}" {} +
+}
+
+first_root=${test_root}/build-first
+second_root=${test_root}/build-second
+restamp_source 1000000000 0600
+RUN_BUILD_ROOT=${first_root} run_prepare >/dev/null
+restamp_source 1200000000 0644
+RUN_BUILD_ROOT=${second_root} run_prepare >/dev/null
+
+for staged in stage-root gomodcache-root; do
+  before=$(context_digest "${first_root}/plugin-abi/${staged}")
+  after=$(context_digest "${second_root}/plugin-abi/${staged}")
+  [[ ${before} == "${after}" ]] || {
+    printf 'prepared %s differs between two runs of the same lock\n' "${staged}" >&2
+    diff \
+      <(LC_ALL=C find "${first_root}/plugin-abi/${staged}" -printf '%y %m %s %P\n' | LC_ALL=C sort) \
+      <(LC_ALL=C find "${second_root}/plugin-abi/${staged}" -printf '%y %m %s %P\n' | LC_ALL=C sort) \
+      | head -20 >&2
+    exit 1
+  }
+  for prepared in "${first_root}" "${second_root}"; do
+    assert_staged "${prepared}/plugin-abi/${staged}"
+  done
+done
 
 echo 'Plugin ABI source preparation and atomic failure passed'

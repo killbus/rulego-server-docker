@@ -18,6 +18,7 @@ platform=$(jq -er '.target.platform' <<<"${build_json}")
 sdk_base=$(jq -er '.native.sdk_base' <<<"${build_json}")
 runtime_base=$(jq -er '.native.runtime_base' <<<"${build_json}")
 manifest_path=$(jq -er '.manifest_path' <<<"${build_json}")
+reproducible_epoch=$(jq -er '.reproducible_epoch' <<<"${build_json}")
 abi_id=$(jq -er '.abi_id' <<<"${build_json}")
 lock_digest=$(jq -er '.lock_digest' <<<"${build_json}")
 libc_minimum=$(jq -er '.native.minimum_version' <<<"${build_json}")
@@ -53,8 +54,8 @@ context=${work}/plugin-abi
 
 probe_source=${work}/abi-probe
 mkdir -p "${probe_source}"
-cp -- "${context}/source/testdata/plugin/plugin.go" "${probe_source}/"
-cp -- "${context}/source/server/go.sum" "${probe_source}/go.sum"
+cp -- "${context}/stage-root/opt/rulego/source/testdata/plugin/plugin.go" "${probe_source}/"
+cp -- "${context}/stage-root/opt/rulego/source/server/go.sum" "${probe_source}/go.sum"
 printf 'module example.com/rulego-abi-probe\n\ngo %s\n\nrequire %s %s\n' \
   "$(jq -er '.go.version' <<<"${build_json}")" \
   "$(jq -er '.rulego_core.module' <<<"${build_json}")" \
@@ -99,7 +100,10 @@ if [[ ${stage} == true ]]; then
 fi
 
 label_args plugin-sdk
-docker buildx build --file "${repository_root}/Dockerfile.plugin-sdk" --platform "${platform}" \
+# SOURCE_DATE_EPOCH pins the config created timestamp and every instruction
+# timestamp, so a rebuild of unchanged content yields the same child digest.
+env SOURCE_DATE_EPOCH="${reproducible_epoch}" \
+  docker buildx build --file "${repository_root}/Dockerfile.plugin-sdk" --platform "${platform}" \
   --build-arg "SDK_BASE=${sdk_base}" --build-arg "ABI_MANIFEST_PATH=${manifest_path}" \
   "${IMAGE_LABELS[@]}" --provenance=mode=max --sbom=true \
   --metadata-file "${work}/sdk-build.json" \
@@ -189,17 +193,30 @@ while IFS=$'\t' read -r host_id tag_suffix; do
   runtime_context=${work}/runtime-context-${host_id}
   runtime_repository=localhost:5000/plugin-runtime-${host_id}-${arch}
   runtime_staging=''
-  mkdir -p "${runtime_context}/rootfs" "${runtime_context}/manifest"
-  chmod 0777 "${runtime_context}/rootfs"
-  docker run --rm --platform "${platform}" --entrypoint /usr/local/bin/build-plugin-host \
+  # The host builder writes the payload at its image-relative path, so the
+  # runtime context is copied to the filesystem root and no parent directory
+  # has to be synthesized during the build. It runs as the invoking identity:
+  # a container writing as another UID would leave entries that this script
+  # cannot restamp, and the epoch probe below would fail on every build.
+  app_root=${runtime_context}/app-root/app
+  abi_stage=${runtime_context}/abi-root/$(dirname -- "${manifest_path#/}")
+  mkdir -p "${app_root}/data" "${abi_stage}"
+  chmod 0777 "${app_root}"
+  docker run --rm --platform "${platform}" --user "$(id -u):$(id -g)" \
+    --entrypoint /usr/local/bin/build-plugin-host \
     --env RULEGO_EDITOR_SOURCE=/input/editor --env "RULEGO_HOST_ID=${host_id}" \
+    --env RULEGO_OUTPUT_ROOT=/out/rootfs \
     --volume "${context}/runtime/editor:/input/editor:ro" \
-    --volume "${runtime_context}/rootfs:/out/rootfs" "${sdk_ref}"
-  cp -- "${context}/manifest/plugin-abi.json" "${runtime_context}/manifest/plugin-abi.json"
+    --volume "${app_root}:/out/rootfs" "${sdk_ref}"
+  cp -- "${context}/manifest/plugin-abi.json" "${abi_stage}/$(basename -- "${manifest_path}")"
+  [[ -d ${app_root}/data ]] || die "${host_id} runtime rootfs has no data directory"
+  stamp_reproducible_tree "${runtime_context}" "${reproducible_epoch}"
+  assert_reproducible_tree "${runtime_context}" "${reproducible_epoch}"
 
   label_args plugin-runtime "${host_id}"
-  docker buildx build --file "${repository_root}/Dockerfile.plugin-runtime" --platform "${platform}" \
-    --build-arg "RUNTIME_BASE=${runtime_base}" --build-arg "ABI_MANIFEST_PATH=${manifest_path}" \
+  env SOURCE_DATE_EPOCH="${reproducible_epoch}" \
+    docker buildx build --file "${repository_root}/Dockerfile.plugin-runtime" --platform "${platform}" \
+    --build-arg "RUNTIME_BASE=${runtime_base}" \
     "${IMAGE_LABELS[@]}" --provenance=mode=max --sbom=true \
     --metadata-file "${work}/runtime-build-${host_id}.json" \
     --output "type=registry,name=${runtime_repository}:candidate" "${runtime_context}"

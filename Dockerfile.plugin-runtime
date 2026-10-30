@@ -2,11 +2,15 @@ ARG RUNTIME_BASE
 
 FROM ${RUNTIME_BASE}
 
-ARG ABI_MANIFEST_PATH
+# Every payload is staged at its image-relative path and copied with the
+# filesystem root as the destination: buildkit re-stamps synthetic parent
+# directories, and any COPY destination below /, to the build clock, so a
+# directory-form COPY into / plus a stamped context is what keeps the child
+# digest independent of when the image is built.
+COPY --chown=0:0 abi-root/ /
+COPY --chown=65532:65532 app-root/ /
 
 WORKDIR /app
-COPY --chown=65532:65532 rootfs/ /app/
-COPY manifest/plugin-abi.json ${ABI_MANIFEST_PATH}
 
 USER 65532:65532
 EXPOSE 9090
