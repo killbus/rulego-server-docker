@@ -117,6 +117,18 @@ prepare_move_line=$(grep -n 'mv -- "${context}" "${destination}"' scripts/prepar
   echo 'the prepared context must be stamped and probed before it reaches the build root' >&2
   exit 1
 }
+# Pruning belongs at the one boundary where nothing that writes is left to run,
+# which is where the stamp already sits. Pruning next to `mod download all`
+# looks equivalent but is not: any later command that resolves modules can
+# re-open the log, and a witness that appears after the boundary is invisible
+# to both the stamp and the probe. The ordering is asserted rather than
+# assumed because moving one line is how this class of drift came back.
+prepare_prune_line=$(grep -n 'rm -rf -- "${sumdb_witness}"' scripts/prepare-plugin-abi.sh | cut -d: -f1)
+last_module_line=$(grep -n 'run_go "${resolver_dir}" list -m -f' scripts/prepare-plugin-abi.sh | tail -n 1 | cut -d: -f1)
+((last_module_line < prepare_prune_line && prepare_prune_line < prepare_move_line)) || {
+  echo 'the transparency-log witness must be pruned after the last module command and before the context is moved' >&2
+  exit 1
+}
 # The nested-destination rule for the recipes is asserted once, in
 # tests/plugin-image-contract.sh.
 

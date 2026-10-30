@@ -33,6 +33,20 @@ assert_contains Dockerfile.plugin-runtime 'COPY --chown=65532:65532 app-root/ /'
 assert_contains Dockerfile.plugin-runtime 'USER 65532:65532'
 assert_contains Dockerfile.plugin-runtime 'VOLUME ["/app/data"]'
 assert_contains Dockerfile.plugin-runtime 'ENTRYPOINT ["/app/rulego-server"]'
+# The SDK version probe must run with a scratch HOME it deletes in the same
+# RUN. With the inherited HOME the probe writes a Go telemetry counter whose
+# file name carries the build date and whose contents carry the week of the
+# build, which puts the wall clock into the child digest through the very layer
+# that exists to prove the toolchain is the locked one. Asserting both halves
+# here: the probe must be redirected, and the scratch directory must not
+# survive into the layer.
+assert_contains Dockerfile.plugin-sdk 'home=$(mktemp -d)'
+assert_contains Dockerfile.plugin-sdk 'HOME="${home}" GOENV="${GOENV}" GOTOOLCHAIN="${GOTOOLCHAIN}" go env GOVERSION'
+assert_contains Dockerfile.plugin-sdk 'rm -rf "${home}"'
+if grep -Eq 'test "\$\(\s*GOENV="\$\{GOENV\}"' Dockerfile.plugin-sdk; then
+  echo 'the SDK version probe reads the toolchain with the inherited HOME, which writes a dated telemetry counter into the image' >&2
+  exit 1
+fi
 if grep -Eq 'SDK_BASE|build-plugin-host|rulego-plugin-build|/go/pkg/mod|/opt/rulego/source' Dockerfile.plugin-runtime; then
   echo 'runtime recipe references the SDK or build payload' >&2
   exit 1

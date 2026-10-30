@@ -83,6 +83,13 @@ case "$*" in
     printf 'resolver-only mutation\n' >>go.sum
     printf '%s\n' "$PWD" >"${fake_root}/resolver-path"
     cp -- go.sum "${fake_root}/resolver-go.sum-after-download"
+    # A real download leaves transparency-log tiles in the module cache, and
+    # which tiles exist depends on how long the log is that day. The stub has
+    # to reproduce that stimulus, or the pruning at the stamp boundary could
+    # pass by never having been given anything to prune.
+    mkdir -p "${GOMODCACHE:?}/cache/download/sumdb/sum.golang.org/tile/8/0/x275"
+    printf 'tile\n' >"${GOMODCACHE:?}/cache/download/sumdb/sum.golang.org/tile/8/0/x275/090"
+    printf '%s\n' "${GOMODCACHE:?}/cache/download/sumdb" >"${fake_root}/sumdb-witness-path"
     ;;
   'list -m all') cat "${fake_root}/module-list.txt" ;;
   'mod graph') cat "${fake_root}/module-graph.txt" ;;
@@ -93,6 +100,13 @@ case "$*" in
   list\ -m\ -f*' all')
     printf 'github.com/rulego/rulego\t%s\tfalse\t\t\th1:module\th1:gomod\n' "${core_version}"
     printf 'github.com/rulego/rulego/server\t\ttrue\t\t\t\t\n'
+    # Any command that resolves modules can re-open the transparency log, so
+    # the last one must be able to re-create the witness. Without this the
+    # ordering guard for the pruning boundary would only detect a moved line
+    # and never the pathology it exists to prevent.
+    mkdir -p "${GOMODCACHE:?}/cache/download/sumdb/sum.golang.org/tile/8/1/x001"
+    printf 'tile\n' >"${GOMODCACHE:?}/cache/download/sumdb/sum.golang.org/tile/8/1/x001/074"
+    printf 'late\n' >>"${fake_root}/sumdb-reopened"
     ;;
   *) printf 'unexpected fake go invocation: %s\n' "$*" >&2; exit 2 ;;
 esac
@@ -164,6 +178,31 @@ for staged in "${output}/stage-root" "${output}/gomodcache-root"; do
   assert_staged "${staged}"
 done
 [[ -d ${output}/gomodcache-root/go/pkg/mod ]]
+
+# The fetch stub always leaves a transparency-log tile in the module cache it
+# is handed, so the pruning at the stamp boundary is exercised rather than
+# skipped. Proving the witness arrived is the first half: without it the gate
+# would pass on a run where nothing ever needed pruning, the same class of
+# vacuous green as a check that never met the pathology it exists to stop. The
+# witness path is recorded while the context still sits in its stage directory,
+# because pruning happens before the atomic move into the build root.
+witness_path=$(<"${test_root}/sumdb-witness-path")
+if [[ ${witness_path} != "${test_root}"/* ]] ||
+  [[ ${witness_path} != */gomodcache-root/go/pkg/mod/cache/download/sumdb ]]; then
+  printf 'the fetch stub did not write its witness into the staged module cache: %s\n' "${witness_path}" >&2
+  exit 1
+fi
+if [[ -e ${output}/gomodcache-root/go/pkg/mod/cache/download/sumdb ]]; then
+  printf 'the staged module cache still carries transparency-log witnesses\n' >&2
+  exit 1
+fi
+# The reopen marker proves the witness was re-created by a command after the
+# download, so the tree that reached the pruning boundary was not empty and the
+# pruner was never handed a directory that no longer existed.
+if [[ ! -s ${test_root}/sumdb-reopened ]]; then
+  printf 'the fetch stub never re-opened the transparency log after the download\n' >&2
+  exit 1
+fi
 
 # The build driver only runs inside GitHub Actions, so nothing else proves that
 # the context paths it reads exist. Resolving them here turns a layout rename in

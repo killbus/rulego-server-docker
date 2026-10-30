@@ -155,6 +155,22 @@ cp -- "${abi_manifest}" "${stage_root}/abi-manifest.json"
 install -m 0755 "${script_dir}/rulego-plugin-build" "${stage_root}/usr/local/bin/rulego-plugin-build"
 install -m 0755 "${script_dir}/build-plugin-host" "${stage_root}/usr/local/bin/build-plugin-host"
 
+# The transparency log is a witness of the fetch, not a good that was fetched.
+# Which sumdb tiles a download caches is a function of how long the log is
+# today, so leaving that subtree in the staged module cache moves a 1 GB layer
+# every day even when no module changed: two real CI builds of one head left
+# 22 tiles in one run and 15 in the other, while all 136,557 other entries
+# matched entry for entry. The log is still consulted online by the download
+# above, so verification is not weakened; only its trace stays out of the
+# image. Pruning sits at the same boundary as the stamp, after every command
+# that resolves modules, so no later resolution can re-open the log behind the
+# boundary and leave a witness that neither the stamp nor the probe ever sees.
+sumdb_witness=${gomodcache_root}/go/pkg/mod/cache/download/sumdb
+rm -rf -- "${sumdb_witness}"
+if [[ -e ${sumdb_witness} ]]; then
+  die "transparency-log witness survived pruning: ${sumdb_witness}"
+fi
+
 # Single source boundary for timestamps: git checkout, the module downloader
 # and the editor fetcher all write wall-clock mtimes, and buildkit copies them
 # into the layer tar. Stamping here is what makes a rebuild of unchanged
