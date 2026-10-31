@@ -166,13 +166,18 @@ vector 'module-graph-list-digest' \
      "0000000000000000000000000000000000000000000000000000000000000001"' \
   changes abi-f421c028b44afbc9997db8336bc56fb14581efd69157986e87fd646dfdb9612b \
     sha256:e997e50a6b6a8cdef13f604e2893e384975606547ee443ea6371353dee2fb53d
+# A new host must carry a ceiling entry because the schema keys ceilings off the host list.
+# Copying the sibling's value instead of writing nulls keeps this vector legal in either
+# release state: null under measurement, positive under ready. Hardcoding null here made it a
+# measurement-only test, so filling the ceilings reddened it for a reason unrelated to what the
+# vector claims to measure.
 vector 'host-list-grows' \
   '.abi.build.hosts += [{"id":"all-plugin","tags":["with_ai","with_all"],
       "tag_suffix":"-all-plugin"}]
      | .release.size_limits.amd64.runtime["all-plugin"] =
-         {"compressed":null,"uncompressed":null}
+         .release.size_limits.amd64.runtime.plugin
      | .release.size_limits.arm64.runtime["all-plugin"] =
-         {"compressed":null,"uncompressed":null}' \
+         .release.size_limits.arm64.runtime.plugin' \
   changes abi-22d172256d0e4b3850ab70c893aa319cfe97743e5977ac8f015882607e98d1bd \
     sha256:f23e644b17ecde120f30d7b8c799d2e52f4846193e3bb5a0d7ef3d11dcefb312
 vector 'host-tags-cleared' '.abi.build.hosts[1].tags = []' \
