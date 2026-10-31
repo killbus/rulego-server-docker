@@ -54,12 +54,25 @@ host distributor -> plugin-abi.lock -> SDK image digest -> plugin .so + ABI side
 The SDK discovery tag is `rulego-plugin-sdk:<abi_id>`. One SDK serves both
 plugin-capable runtime hosts:
 
+Note: `<abi_id>` hashes the full `.abi` closure **including** `.abi.build.hosts`,
+so adding a variant changes `abi_id` and mints a new SDK name. Each host set is a
+distinct ABI identity until the identity domain is narrowed (contract pending).
+
 - `rulego-server:v1.0.0-plugin` is the standard host without optional component tags.
 - `rulego-server:v1.0.0-ai-plugin` is built with `with_ai` and includes `ai/agent`.
 
 The same ABI-compatible plugin can be loaded by either runtime. Consumers
 execute the OCI digests recorded in the workflow's `plugin-abi-release.json`;
 canonical tags are first-writer immutable and there are no moving aliases.
+
+When a host canonical tag (for example `v1.0.0-plugin`) is already held by the
+contract this lock supersedes, the publish gate records it as
+`superseded` and skips republishing it rather than blocking the whole batch.
+Consumers pinning that tag keep resolving to the earlier immutable digest; the
+current run still publishes the SDK and every newly allocatable host. The
+release record lists these under `superseded_hosts` so the skipped name is data,
+not a recollection. Only a tag held by an identity this lock cannot account for, or
+one the registry cannot answer for, blocks publication.
 An `-all-plugin` host is reserved for a later release and is not produced by
 this contract.
 

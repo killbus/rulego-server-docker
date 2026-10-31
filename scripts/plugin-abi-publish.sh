@@ -171,11 +171,24 @@ while IFS=$'\t' read -r host_id runtime_index; do
   runtime_name=$(jq -er --arg host_id "${host_id}" '.runtime[$host_id]' <<<"${tags}")
   printf '%s\t%s\t%s\n' "${runtime_repository}:${runtime_name#*:}" "${runtime_index}" "runtime-${host_id}" >>"${canonical_plan}"
 done < <(jq -r 'to_entries[] | [.key, .value] | @tsv' <<<"${runtime_staging_indexes}")
-require_immutable_tags_publishable "${canonical_plan}"
+# The gate classifies every canonical name before the first write. Only a `superseded` runtime
+# host is left alone: an earlier contract holds that name, and its digest still answers to it.
+gate_decisions=$(require_immutable_tags_publishable "${canonical_plan}")
+superseded_hosts=$(canonical_superseded_hosts "${gate_decisions}")
+
+# The SDK name carries this contract's identity, so nothing else can hold it legitimately. If the
+# gate ever reads it as superseded, writing anyway would publish a release whose own record cannot
+# name its SDK, and skipping it would do the same more quietly. Refuse before the first write.
+canonical_sdk_superseded "${gate_decisions}" ||
+  die 'the SDK canonical tag reads as superseded; a release without its SDK is not publishable'
 
 sdk_ref=$(publish_immutable_image_tag "${sdk_canonical}" "${sdk_staging_index}")
 runtime_refs='{}'
 while IFS= read -r host_id; do
+  if jq -e --arg host "${host_id}" 'index($host) != null' <<<"${superseded_hosts}" >/dev/null; then
+    log "skipping canonical write for ${host_id}: held by the superseded contract"
+    continue
+  fi
   runtime_name=$(jq -er --arg host_id "${host_id}" '.runtime[$host_id]' <<<"${tags}")
   runtime_canonical=${runtime_repository}:${runtime_name#*:}
   runtime_index=$(jq -er --arg host_id "${host_id}" '.[$host_id]' <<<"${runtime_staging_indexes}")
@@ -187,10 +200,13 @@ done < <(jq -r '.hosts[].id' <<<"${ci_json}")
 PLUGIN_ABI_SIZE_REPORT=${TMPDIR}/published-sizes.tsv \
 PLUGIN_ABI_PACKAGING_SOURCE=${source_url} \
 PLUGIN_ABI_PACKAGING_REVISION=${packaging_revision} \
+  PLUGIN_ABI_SUPERSEDED_HOSTS="${superseded_hosts}" \
   "${script_dir}/verify-plugin-oci.sh" "${sdk_ref}" "${runtime_refs}" release
 
 jq -S -n --arg abi_id "${abi_id}" --arg lock_digest "${lock_digest}" \
   --arg packaging_revision "${packaging_revision}" --arg sdk "${sdk_ref}" --argjson runtime "${runtime_refs}" \
-  '{abi_id:$abi_id,lock_digest:$lock_digest,packaging_revision:$packaging_revision,sdk:$sdk,runtime:$runtime}' \
+  --argjson superseded "${superseded_hosts}" \
+  '{abi_id:$abi_id,lock_digest:$lock_digest,packaging_revision:$packaging_revision,sdk:$sdk,
+    runtime:$runtime,superseded_hosts:$superseded}' \
   >"${TMPDIR}/plugin-abi-release.json"
 log "published immutable Plugin ABI indexes; record: tmp/plugin-abi-release.json"

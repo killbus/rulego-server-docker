@@ -38,6 +38,10 @@ docker() {
     return
   fi
   if [[ $1 == buildx && $2 == imagetools && $3 == inspect ]]; then
+    if [[ -n ${MOCK_HELD_BY:-} ]]; then
+      printf '{"annotations":{"io.rulego.abi.id":"%s"}}\n' "${MOCK_HELD_BY}"
+      return
+    fi
     if [[ ${MOCK_INDEX_STATE:?} == complete ]]; then
       printf '{"manifests":[{"platform":{"os":"linux","architecture":"arm64"},"digest":"%s"},{"platform":{"os":"linux","architecture":"amd64"},"digest":"%s"}]}\n' \
         "${other}" "${expected}"
@@ -161,5 +165,93 @@ decision_case 'registry silent' unreachable unreachable '' "${other}" "${want}" 
 # unexplained holder, not a satisfied one. Falling through to collision here is the difference
 # between a contract fact and a guess.
 decision_case 'no predecessor recorded' collision occupied "${prev_abi}" "${other}" "${want}" "${this_abi}" ""
+
+# The gate's real job: a name owned by the contract this lock supersedes must not hold the rest of
+# the batch hostage. These two lines are one batch where the runtime tag belongs to the lock's
+# recorded predecessor and the SDK tag is this build's, so the old digest-only rule refused both.
+superseded_plan=${test_root}/superseded-plan.tsv
+printf '%s\t%s\t%s\n%s\t%s\t%s\n' \
+  registry.example:5000/rulego-plugin-sdk:abi-test "${source_ref}" plugin-sdk \
+  registry.example:5000/rulego-server:v1.0.0-plugin "registry.example:5000/rulego-server@${expected}" runtime-plugin \
+  >"${superseded_plan}"
+
+# Registry stand-in: the SDK name is free, the runtime name resolves to bytes that are not this
+# build's. Which identity owns it is supplied per case through MOCK_HELD_BY.
+registry_mock() {
+  case ${1:-} in
+    *:abi-test) return 1 ;;
+    *) printf '%s\n' "${other}" ;;
+  esac
+}
+
+MOCK_HELD_BY=$(jq -er '.compatibility.previous_sdk.abi_id' "${repository_root}/plugin-abi.lock")
+rm -f -- "${state}" "${docker_log}"
+image_reference_digest() { registry_mock "${1:-}"; }
+gate_out=$(require_immutable_tags_publishable "${superseded_plan}") || {
+  echo 'a superseded canonical name must not block its batch' >&2
+  exit 1
+}
+[[ ! -e ${docker_log} ]]
+printf '%s\n' "${gate_out}" | grep -Fq 'runtime-plugin	superseded' || {
+  echo 'the gate did not report the superseded host to its caller' >&2
+  exit 1
+}
+unset MOCK_HELD_BY
+
+# A holder the lock accounts for in neither way still refuses everything, and says who.
+MOCK_HELD_BY=abi-0000000000000000000000000000000000000000000000000000000000000000
+rm -f -- "${state}" "${docker_log}"
+if (require_immutable_tags_publishable "${superseded_plan}") >"${test_root}/unexplained.out" 2>"${test_root}/stderr"; then
+  echo 'expected an unexplained canonical holder to block the batch' >&2
+  exit 1
+fi
+[[ ! -e ${docker_log} ]]
+grep -Fq 'collision' "${test_root}/stderr"
+
+# Same identity, different bytes: two packaging revisions of one contract reached for the same
+# immutable name. Supersession does not cover this, and reading it as satisfied would quietly
+# point a published name at content the lock never produced.
+MOCK_HELD_BY=$(jq -er '.abi_id' "${repository_root}/plugin-abi.lock")
+rm -f -- "${state}" "${docker_log}"
+if (require_immutable_tags_publishable "${superseded_plan}") 2>"${test_root}/self.out"; then
+  echo 'expected the same identity under a different digest to block' >&2
+  exit 1
+fi
+grep -Fq 'identity-conflict' "${test_root}/self.out"
+unset MOCK_HELD_BY
+
+# The two readers of the gate's verdict lines are pure, so their contract is pinned without a
+# registry. Inputs are built with printf so the tab separator is a real byte, not a literal.
+host_case() {
+  local description=$1 want=$2 actual
+  actual=$(canonical_superseded_hosts "${3-}")
+  [[ ${actual} == "${want}" ]] || {
+    printf 'superseded-host extraction wrong for %s: expected %s, got %s\n' \
+      "${description}" "${want}" "${actual}" >&2
+    exit 1
+  }
+}
+
+rows() { printf '%s\t%s\n' "$@"; }
+
+host_case 'empty input' '[]' ''
+host_case 'no superseded rows' '[]' "$(rows plugin-sdk publish runtime-plugin noop)"
+host_case 'one host drops' '["ai-plugin"]' "$(rows plugin-sdk publish runtime-ai-plugin superseded)"
+host_case 'both hosts drop, prefix stripped once' '["plugin","ai-plugin"]' \
+  "$(rows plugin-sdk publish runtime-plugin superseded runtime-ai-plugin superseded)"
+
+# The SDK guard passes whenever the SDK is not the one being superseded, and fails only then.
+canonical_sdk_superseded "$(rows plugin-sdk publish runtime-plugin superseded)" || {
+  echo 'SDK guard must tolerate a superseded runtime host' >&2
+  exit 1
+}
+canonical_sdk_superseded '' || {
+  echo 'SDK guard must tolerate an empty verdict set' >&2
+  exit 1
+}
+if canonical_sdk_superseded "$(rows plugin-sdk superseded runtime-plugin publish)"; then
+  echo 'SDK guard must reject a release that would skip its own SDK' >&2
+  exit 1
+fi
 
 echo 'Plugin publication immutability and platform policy passed'
