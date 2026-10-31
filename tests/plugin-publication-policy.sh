@@ -127,4 +127,39 @@ if (require_immutable_tags_publishable "${test_root}/missing-plan.tsv") 2>/dev/n
   exit 1
 fi
 
+# The publication decision is a pure function of probe facts, so every branch is checkable
+# without a registry. These vectors pin the rule that decides whether a blocked name really
+# blocks: `superseded` must be the only occupied-but-publishable verdict, and it must be reached
+# from the identity the lock records, never from a digest guess.
+this_abi=abi-cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+prev_abi=abi-dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
+want=sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee
+other=sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff
+
+decision_case() {
+  local description=$1 want_out=$2; shift 2
+  local actual
+  actual=$(canonical_tag_publish_decision "$@") || {
+    printf 'decision function failed for: %s\n' "${description}" >&2
+    exit 1
+  }
+  [[ ${actual} == "${want_out}" ]] || {
+    printf 'decision mismatch for %s: expected %s, got %s\n' \
+      "${description}" "${want_out}" "${actual}" >&2
+    exit 1
+  }
+}
+
+decision_case 'free name' publish absent '' "" "${want}" "${this_abi}" "${prev_abi}"
+decision_case 'already ours bit-for-bit' noop occupied "${this_abi}" "${want}" "${want}" "${this_abi}" "${prev_abi}"
+decision_case 'earlier contract owns it' superseded occupied "${prev_abi}" "${other}" "${want}" "${this_abi}" "${prev_abi}"
+decision_case 'same abi different bytes' identity-conflict occupied "${this_abi}" "${other}" "${want}" "${this_abi}" "${prev_abi}"
+decision_case 'holder the lock cannot name' collision occupied 'abi-99999999' "${other}" "${want}" "${this_abi}" "${prev_abi}"
+decision_case 'registry silent' unreachable unreachable '' "${other}" "${want}" "${this_abi}" "${prev_abi}"
+
+# A lock with no recorded predecessor has nothing to be superseded by: the older name is then an
+# unexplained holder, not a satisfied one. Falling through to collision here is the difference
+# between a contract fact and a guess.
+decision_case 'no predecessor recorded' collision occupied "${prev_abi}" "${other}" "${want}" "${this_abi}" ""
+
 echo 'Plugin publication immutability and platform policy passed'

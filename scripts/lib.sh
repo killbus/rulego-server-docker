@@ -518,6 +518,58 @@ canonical_tag_verdict() {
   esac
 }
 
+# Decides what publication may do with one canonical tag, from facts supplied by the caller.
+# It performs no I/O so the rule that unblocks a release stays testable offline: a registry
+# answer is the only input that needs one.
+#
+# `noop` is the case `publish_immutable_image_tag` already tolerates: the name holds exactly the
+# digest this build produced, so a rerun of the revision that first published it needs no write.
+# It is checked before any identity comparison because content equality outranks provenance.
+#
+# `superseded` means an earlier contract owns the name. Runtime canonical tags are named after the
+# upstream release alone, so once that contract claimed the name no later lock can; the earlier
+# digest still satisfies the name's promise, and consumers pin it unchanged. This is the one
+# verdict that must not block a release, because blocking on it makes main permanently red -- the
+# condition under which a gate gets weakened until it means nothing.
+#
+# `identity-conflict` is narrower and genuinely fatal: the holder carries *this* lock's ABI
+# identity yet a different digest, which is two packaging revisions of one contract claiming the
+# same immutable name. Advancing `release_version` is the only honest exit.
+#
+# `collision` is a holder this lock accounts for in neither way, and `unreachable` is a registry
+# that could not answer; neither is ever read as free.
+canonical_tag_publish_decision() {
+  local probe_status=${1:?probe status is required}
+  local held_by=${2:-}
+  local existing=${3:-}
+  local expected=${4:?expected digest is required}
+  local this_abi=${5:?this identity is required}
+  local previous_abi=${6:-}
+
+  case ${probe_status} in
+    unreachable)
+      printf 'unreachable\n'
+      return
+      ;;
+    absent)
+      printf 'publish\n'
+      return
+      ;;
+    occupied) ;;
+    *) die "unknown canonical tag probe status: ${probe_status}" ;;
+  esac
+
+  if [[ -n ${existing} && ${existing} == "${expected}" ]]; then
+    printf 'noop\n'
+  elif [[ -n ${previous_abi} && ${held_by} == "${previous_abi}" ]]; then
+    printf 'superseded\n'
+  elif [[ ${held_by} == "${this_abi}" ]]; then
+    printf 'identity-conflict\n'
+  else
+    printf 'collision\n'
+  fi
+}
+
 # Probes every canonical target before any tag is written so one authorized
 # release either publishes all of its tags or none of them. A runtime canonical
 # tag is named after the host release alone, but its index annotations carry
