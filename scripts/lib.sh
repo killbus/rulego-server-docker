@@ -518,37 +518,149 @@ canonical_tag_verdict() {
   esac
 }
 
-# Probes every canonical target before any tag is written so one authorized
-# release either publishes all of its tags or none of them. A runtime canonical
-# tag is named after the host release alone, but its index annotations carry
-# both the ABI identity and the packaging revision, so only the exact build
-# that first claimed a release version can reproduce it. Any later ABI
-# re-sign, and any rebuild from another commit, conflicts.
+# Decides what publication may do with one canonical tag, from facts supplied by the caller.
+# It performs no I/O so the rule that unblocks a release stays testable offline: a registry
+# answer is the only input that needs one.
+#
+# `noop` is the case `publish_immutable_image_tag` already tolerates: the name holds exactly the
+# digest this build produced, so a rerun of the revision that first published it needs no write.
+# It is checked before any identity comparison because content equality outranks provenance.
+#
+# `superseded` means an earlier contract owns the name. Runtime canonical tags are named after the
+# upstream release alone, so once that contract claimed the name no later lock can; the earlier
+# digest still satisfies the name's promise, and consumers pin it unchanged. This is the one
+# verdict that must not block a release, because blocking on it makes main permanently red -- the
+# condition under which a gate gets weakened until it means nothing.
+#
+# `identity-conflict` is narrower and genuinely fatal: the holder carries *this* lock's ABI
+# identity yet a different digest, which is two packaging revisions of one contract claiming the
+# same immutable name. Advancing `release_version` is the only honest exit.
+#
+# `collision` is a holder this lock accounts for in neither way, and `unreachable` is a registry
+# that could not answer; neither is ever read as free.
+canonical_tag_publish_decision() {
+  local probe_status=${1:?probe status is required}
+  local held_by=${2:-}
+  local existing=${3:-}
+  local expected=${4:?expected digest is required}
+  local this_abi=${5:?this identity is required}
+  local previous_abi=${6:-}
+
+  case ${probe_status} in
+    unreachable)
+      printf 'unreachable\n'
+      return
+      ;;
+    absent)
+      printf 'publish\n'
+      return
+      ;;
+    occupied) ;;
+    *) die "unknown canonical tag probe status: ${probe_status}" ;;
+  esac
+
+  if [[ -n ${existing} && ${existing} == "${expected}" ]]; then
+    printf 'noop\n'
+  elif [[ -n ${previous_abi} && ${held_by} == "${previous_abi}" ]]; then
+    printf 'superseded\n'
+  elif [[ ${held_by} == "${this_abi}" ]]; then
+    printf 'identity-conflict\n'
+  else
+    printf 'collision\n'
+  fi
+}
+
+# Probes every canonical target before any tag is written.
+#
+# The decision is `canonical_tag_publish_decision` above; this function supplies it from the
+# registry and separates two things the old gate conflated. A name whose digest is not this
+# build's was always a block, so a tag owned by the contract this lock supersedes refused every
+# tag in the batch -- including variants whose own names are free -- and the rejection named no
+# variant. Supersession is a fact the lock already records, so it is now a skip, not a stop.
+#
+# Every name is echoed as `<identity>\t<decision>`, one of `publish`, `noop`, or `superseded`, so
+# the caller decides per artifact rather than rediscovering the verdict. `noop` means the name
+# already holds exactly this build's digest: writing is unnecessary, the ref still belongs in the
+# release record. `superseded` means the name is satisfied by another contract's digest and this
+# release must not reach for it.
+#
+# A real conflict still refuses the whole batch. That is the point of the gate: a release that
+# cannot claim all the names it means to claim should claim none of them.
 # Each plan line is <canonical-target>\t<digest-addressed-source>\t<identity>.
 require_immutable_tags_publishable() {
   local plan=${1:?canonical tag plan is required}
   [[ -f ${plan} ]] || die "canonical tag plan not found: ${plan}"
 
-  local target source expected existing status identity conflicts=()
+  # The identities compared below come from the same lock the tags were rendered from. Resolving
+  # it any other way would let the verdict be evidence about a contract nobody is publishing.
+  local repository_root lock_file abi_id previous_abi
+  repository_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+  lock_file=${PLUGIN_ABI_LOCK:-${repository_root}/plugin-abi.lock}
+  [[ -f ${lock_file} ]] || die "Plugin ABI lock not found: ${lock_file}"
+  abi_id=$(jq -er '.abi_id' "${lock_file}") || die "cannot read abi_id from ${lock_file}"
+  previous_abi=$(jq -er '.compatibility.previous_sdk.abi_id' "${lock_file}") ||
+    die "cannot read compatibility.previous_sdk.abi_id from ${lock_file}"
+
+  local target source expected existing status identity held_by probe_status decision
+  local conflicts=()
   while IFS=$'\t' read -r target source identity; do
     [[ -n ${target} && -n ${source} && -n ${identity} ]] ||
       die "invalid canonical tag plan line for ${plan}"
     expected=${source##*@}
     [[ ${source} =~ @sha256:[0-9a-f]{64}$ ]] ||
       die "source image must be addressed by digest: ${source}"
+
     if existing=$(image_reference_digest "${target}"); then
-      [[ ${existing} == "${expected}" ]] ||
-        conflicts+=("${identity}: ${target} holds ${existing}, this release needs ${expected}")
+      if [[ ${existing} == "${expected}" ]]; then
+        probe_status=occupied held_by=${abi_id}
+      else
+        # The digest differs, so the question is whose it is. That answer lives in the index
+        # annotation publication writes, not in the digest.
+        IFS=$'\t' read -r probe_status held_by < <(canonical_tag_probe "${target}") ||
+          die "canonical tag probe returned no verdict for ${target}"
+      fi
     else
       status=$?
       ((status == 1)) || die "canonical tag cannot be inspected: ${target}"
+      probe_status=absent held_by=''
     fi
+
+    decision=$(canonical_tag_publish_decision "${probe_status}" "${held_by}" \
+      "${existing:-}" "${expected}" "${abi_id}" "${previous_abi}")
+    case ${decision} in
+      publish|noop|superseded)
+        printf '%s\t%s\n' "${identity}" "${decision}"
+        ;;
+      *)
+        conflicts+=("${identity}: ${target} holds ${existing:-nothing readable} (${decision})")
+        ;;
+    esac
   done <"${plan}"
 
   (( ${#conflicts[@]} == 0 )) ||
-    die "no tag written; canonical tags already published for a different build: $(
+    die "no tag written; canonical tags already published for a build this lock cannot supersede: $(
       printf '%s; ' "${conflicts[@]}"
     ) advance abi.rulego_server.release_version before publishing this build"
+}
+
+# Turns the gate's `<identity>\t<decision>` lines into the runtime hosts this release must leave
+# alone. `runtime-` is the identity prefix publication gives each host, and the verifier and the
+# release record both work in bare host ids, so the prefix is stripped here once rather than at
+# each consumer.
+canonical_superseded_hosts() {
+  jq -Rsc '
+    split("\n") | map(select(length > 0) | split("\t") | select(.[1] == "superseded") | .[0])
+    | map(sub("^runtime-"; ""))' <<<"${1:-}"
+}
+
+# True when no decision line marks the SDK as superseded. The SDK canonical tag is named after this
+# contract's own identity, so no other contract can hold it legitimately; a release that skipped it
+# would publish runtimes whose record cannot name the SDK they were built with.
+canonical_sdk_superseded() {
+  ! jq -e -Rs '
+    split("\n") | map(select(length > 0) | split("\t"))
+    | map(select(.[0] == "plugin-sdk" and .[1] == "superseded")) | length > 0
+  ' <<<"${1:-}" >/dev/null
 }
 
 retry_command() {

@@ -15,11 +15,17 @@ mode=$3
 "${script_dir}/plugin-abi.sh" validate "--${mode}"
 require_command docker jq sha256sum
 expected_hosts=$("${script_dir}/plugin-abi.sh" render ci | jq -c '[.hosts[].id] | sort')
-jq -e --argjson expected_hosts "${expected_hosts}" '
+# Hosts the publication gate decided not to write are named here rather than rediscovered. A
+# superseded host is satisfied by an earlier contract's digest, so its absence from this release's
+# refs is correct; every other absence is a host nobody published and must stay red.
+superseded_hosts=${PLUGIN_ABI_SUPERSEDED_HOSTS:-[]}
+jq -e --argjson expected_hosts "${expected_hosts}" --argjson superseded "${superseded_hosts}" '
   type == "object" and
-  (keys_unsorted | sort) == $expected_hosts and
-  all(.[]; type == "string" and test("@sha256:[0-9a-f]{64}$"))
-' <<<"${runtime_refs}" >/dev/null || die 'runtime indexes must match the locked host variants'
+  ($superseded | type) == "array" and
+  ((keys_unsorted | sort) == ($expected_hosts - $superseded)) and
+  all(.[]; type == "string" and test("@sha256:[0-9a-f]{64}$")) and
+  (keys_unsorted | length) == (($expected_hosts | length) - ($superseded | length))
+' <<<"${runtime_refs}" >/dev/null || die 'runtime indexes must match the locked host variants minus the superseded ones'
 
 mkdir -p "${repository_root}/tmp"
 work=$(mktemp -d "${repository_root}/tmp/plugin-oci.XXXXXX")
