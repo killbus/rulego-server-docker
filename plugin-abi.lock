@@ -79,7 +79,7 @@
     }
   },
   "release": {
-    "state": "measurement",
+    "state": "ready",
     "sdk_image": "rulego-plugin-sdk",
     "runtime_image": "rulego-server",
     "manifest_path": "/usr/share/rulego/plugin-abi.json",
@@ -95,17 +95,17 @@
     },
     "size_limits": {
       "amd64": {
-        "sdk": {"compressed": null, "uncompressed": null},
+        "sdk": {"compressed": 1500000000, "uncompressed": 3800000000},
         "runtime": {
-          "plugin": {"compressed": null, "uncompressed": null},
-          "ai-plugin": {"compressed": null, "uncompressed": null}
+          "plugin": {"compressed": 35000000, "uncompressed": 80000000},
+          "ai-plugin": {"compressed": 50000000, "uncompressed": 120000000}
         }
       },
       "arm64": {
-        "sdk": {"compressed": null, "uncompressed": null},
+        "sdk": {"compressed": 1500000000, "uncompressed": 3800000000},
         "runtime": {
-          "plugin": {"compressed": null, "uncompressed": null},
-          "ai-plugin": {"compressed": null, "uncompressed": null}
+          "plugin": {"compressed": 35000000, "uncompressed": 90000000},
+          "ai-plugin": {"compressed": 50000000, "uncompressed": 120000000}
         }
       }
     }
