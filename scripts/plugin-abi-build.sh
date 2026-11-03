@@ -21,6 +21,7 @@ manifest_path=$(jq -er '.manifest_path' <<<"${build_json}")
 reproducible_epoch=$(jq -er '.reproducible_epoch' <<<"${build_json}")
 abi_id=$(jq -er '.abi_id' <<<"${build_json}")
 lock_digest=$(jq -er '.lock_digest' <<<"${build_json}")
+abi_manifest_digest=$(jq -er '.abi_manifest_digest' <<<"${build_json}")
 libc_minimum=$(jq -er '.native.minimum_version' <<<"${build_json}")
 stage=${PLUGIN_ABI_STAGE:-false}
 publish=${PLUGIN_ABI_PUBLISH:-false}
@@ -166,8 +167,8 @@ chmod 0777 "${work}/sdk-output"
 docker run --rm --platform "${platform}" \
   --volume "${probe_source}:/workspace:ro" --volume "${work}/sdk-output:/output" \
   "${sdk_ref}" . "/output/sdk-probe-${arch}.so"
-jq -e --arg abi "${abi_id}" --arg platform "${platform}" --arg lock "${lock_digest}" \
-  '.abi_id==$abi and .platform==$platform and .lock_digest==$lock' \
+jq -e --arg abi "${abi_id}" --arg platform "${platform}" --arg manifest "${abi_manifest_digest}" \
+  '.abi_id==$abi and .platform==$platform and .abi_manifest_digest==$manifest' \
   "${work}/sdk-output/sdk-probe-${arch}.so.abi.json" >/dev/null
 docker run --rm --platform "${platform}" --entrypoint go \
   --volume "${work}/sdk-output:/output:ro" "${sdk_ref}" \
@@ -341,6 +342,7 @@ fi
 jq -S -n \
   --arg architecture "${arch}" --arg platform "${platform}" --arg abi_id "${abi_id}" \
   --arg lock_digest "${lock_digest}" --arg packaging_revision "${packaging_revision}" \
+  --arg abi_manifest_digest "${abi_manifest_digest}" \
   --arg legacy_abi_id "${legacy_abi_id}" --arg legacy_sdk_index "${legacy_sdk_index}" \
   --arg legacy_sdk_child "${legacy_sdk_child}" --arg legacy_sdk_reference "${legacy_sdk_ref}" \
   --arg sdk_local "${sdk_repository}" --arg sdk_staging "${sdk_staging}" \
@@ -348,6 +350,7 @@ jq -S -n \
   --argjson sdk_compressed "${sdk_compressed}" --argjson sdk_uncompressed "${sdk_uncompressed}" \
   --argjson runtime "${runtime_evidence}" '
   {architecture:$architecture,platform:$platform,abi_id:$abi_id,lock_digest:$lock_digest,
+   abi_manifest_digest:$abi_manifest_digest,
    packaging_revision:$packaging_revision,
    compatibility_probe:{abi_id:$legacy_abi_id,sdk_index_digest:$legacy_sdk_index,
      sdk_child_digest:$legacy_sdk_child,sdk_reference:$legacy_sdk_reference},

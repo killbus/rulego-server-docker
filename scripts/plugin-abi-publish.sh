@@ -19,6 +19,7 @@ mkdir -p "${repository_root}/tmp"
 export TMPDIR=${repository_root}/tmp
 abi_id=$("${script_dir}/plugin-abi.sh" render id)
 lock_digest=$("${script_dir}/plugin-abi.sh" render lock-digest)
+abi_manifest_digest=$("${script_dir}/plugin-abi.sh" render manifest-digest)
 packaging_revision=${GITHUB_SHA:?GITHUB_SHA is required}
 [[ ${packaging_revision} =~ ^[0-9a-f]{40}$ ]] || die 'GITHUB_SHA must be a full lowercase commit revision'
 # `packaging_revision` qualifies staging tag names and the release record only. It is deliberately
@@ -28,6 +29,10 @@ packaging_revision=${GITHUB_SHA:?GITHUB_SHA is required}
 # buildx writes per invocation anyway.
 owner=${GITHUB_REPOSITORY_OWNER:?GITHUB_REPOSITORY_OWNER is required}
 owner=${owner,,}
+# The canonical runtime name is a per-build name, and this build is the one it names. The same value
+# already qualifies staging tag names and the release record, and it is still kept out of image bytes:
+# that is what lets a rebuild of an unchanged contract compare equal to its own content.
+export PLUGIN_ABI_NAME_REVISION=${packaging_revision}
 tags=$("${script_dir}/plugin-abi.sh" render tags)
 ci_json=$("${script_dir}/plugin-abi.sh" render ci)
 sdk_name=$(jq -er '.sdk' <<<"${tags}")
@@ -44,9 +49,11 @@ verify_evidence() {
   local arch=$1 file=$2 host_id tag_suffix staging index child expected_staging inspected
   [[ -f ${file} ]] || die "missing native evidence: ${file}"
   jq -e --arg arch "${arch}" --arg abi "${abi_id}" --arg lock "${lock_digest}" \
+    --arg manifest "${abi_manifest_digest}" \
     --arg revision "${packaging_revision}" --argjson hosts "$(jq -c '[.hosts[].id] | sort' <<<"${ci_json}")" '
     .architecture == $arch and .platform == ("linux/" + $arch) and
-    .abi_id == $abi and .lock_digest == $lock and .packaging_revision == $revision and
+    .abi_id == $abi and .lock_digest == $lock and
+    .abi_manifest_digest == $manifest and .packaging_revision == $revision and
     (.runtime | keys | sort) == $hosts and
     ([.sdk, .runtime[]] | all(
       (.staging_reference | type == "string" and length > 0) and
@@ -176,13 +183,26 @@ plan_children() {
     "$(jq -er "${selector}.child_digest" "${evidence_dir}/plugin-abi-arm64.json")"
 }
 
+# The plan is a set of first-writer promises, so it carries canonical names only. An alias moves by
+# design, and a plan line holding a moving name would make the next verified build refuse to publish
+# because the previous one had written that name.
+while IFS=$'\t' read -r host_id canonical_name alias_name; do
+  [[ ${canonical_name} != "${alias_name}" ]] ||
+    die "canonical and alias runtime names are identical for ${host_id}: ${canonical_name}"
+done < <(jq -r '.runtime | to_entries[] | [.key, .value.canonical, .value.alias] | @tsv' <<<"${tags}")
+
 printf '%s\t%s\t%s\t%s\n' "${sdk_canonical}" "${sdk_staging_index}" plugin-sdk \
   "$(plan_children '.sdk')" >>"${canonical_plan}"
 while IFS=$'\t' read -r host_id runtime_index; do
-  runtime_name=$(jq -er --arg host_id "${host_id}" '.runtime[$host_id]' <<<"${tags}")
+  runtime_name=$(jq -er --arg host_id "${host_id}" '.runtime[$host_id].canonical' <<<"${tags}")
   printf '%s\t%s\t%s\t%s\n' "${runtime_repository}:${runtime_name#*:}" "${runtime_index}" \
     "runtime-${host_id}" "$(plan_children ".runtime[\"${host_id}\"]")" >>"${canonical_plan}"
 done < <(jq -r 'to_entries[] | [.key, .value] | @tsv' <<<"${runtime_staging_indexes}")
+# The plan's size is checked against the lock, not against this render: a canonical runtime name that
+# came out null would otherwise look like a smaller batch. `PLUGIN_ABI_NAME_REVISION=none` is the
+# pre-build state and is never legal here, where names are about to be written.
+require_canonical_plan_lines "${canonical_plan}" "$(jq -r '.hosts | length' <<<"${ci_json}")"
+
 # The gate classifies every canonical name before the first write. Only a `superseded` runtime
 # host is left alone: an earlier contract holds that name, and its digest still answers to it.
 gate_decisions=$(require_immutable_tags_publishable "${canonical_plan}")
@@ -203,7 +223,7 @@ while IFS= read -r host_id; do
     log "skipping canonical write for ${host_id}: held by the superseded contract"
     continue
   fi
-  runtime_name=$(jq -er --arg host_id "${host_id}" '.runtime[$host_id]' <<<"${tags}")
+  runtime_name=$(jq -er --arg host_id "${host_id}" '.runtime[$host_id].canonical' <<<"${tags}")
   runtime_canonical=${runtime_repository}:${runtime_name#*:}
   runtime_index=$(jq -er --arg host_id "${host_id}" '.[$host_id]' <<<"${runtime_staging_indexes}")
   IFS=$'\t' read -r host_amd64_child host_arm64_child <<<"$(plan_children ".runtime[\"${host_id}\"]")"
@@ -217,10 +237,18 @@ PLUGIN_ABI_SIZE_REPORT=${TMPDIR}/published-sizes.tsv \
   PLUGIN_ABI_SUPERSEDED_HOSTS="${superseded_hosts}" \
   "${script_dir}/verify-plugin-oci.sh" "${sdk_ref}" "${runtime_refs}" release
 
+# The aliases are recorded as names, not as facts about the registry: writing them is a later step
+# that re-reads the registry for itself. A promotion step that had to rebuild these names from the
+# lock would be a second naming function, and the two could disagree without anything noticing.
+runtime_aliases=$(jq -c --arg repository "${runtime_repository}" '
+  .runtime | map_values($repository + ":" + (.alias | split(":")[1]))' <<<"${tags}")
 jq -S -n --arg abi_id "${abi_id}" --arg lock_digest "${lock_digest}" \
+  --arg abi_manifest_digest "${abi_manifest_digest}" \
   --arg packaging_revision "${packaging_revision}" --arg sdk "${sdk_ref}" --argjson runtime "${runtime_refs}" \
+  --argjson runtime_aliases "${runtime_aliases}" \
   --argjson superseded "${superseded_hosts}" \
-  '{abi_id:$abi_id,lock_digest:$lock_digest,packaging_revision:$packaging_revision,sdk:$sdk,
-    runtime:$runtime,superseded_hosts:$superseded}' \
+  '{abi_id:$abi_id,lock_digest:$lock_digest,abi_manifest_digest:$abi_manifest_digest,
+    packaging_revision:$packaging_revision,sdk:$sdk,
+    runtime:$runtime,runtime_aliases:$runtime_aliases,superseded_hosts:$superseded}' \
   >"${TMPDIR}/plugin-abi-release.json"
 log "published immutable Plugin ABI indexes; record: tmp/plugin-abi-release.json"

@@ -506,9 +506,117 @@ canonical_tag_plan() {
 
   jq -r --arg owner "${owner}" '
     [ {identity: "plugin-sdk", target: ("ghcr.io/" + $owner + "/" + .sdk)} ] +
-    [ .runtime | to_entries[] |
-        {identity: ("runtime-" + .key), target: ("ghcr.io/" + $owner + "/" + .value)} ] |
+    # The plan carries canonical names only. An alias is a moving name and must never appear here,
+    # because everything downstream treats a plan line as a first-writer promise. A null canonical is
+    # the pre-build state: no build has decided that name yet, so there is nothing to promise and no
+    # line to write. Publication counts the lines it gets against the lock, so a null there is refused
+    # rather than read as a smaller batch.
+    [ .runtime | to_entries[] | select(.value.canonical != null) |
+        {identity: ("runtime-" + .key), target: ("ghcr.io/" + $owner + "/" + .value.canonical)} ] |
     .[] | [.identity, .target] | @tsv' <<<"${tags}"
+}
+
+# The moving names of the same rendered tags, as <identity>\t<target> lines. They are derived here, in
+# one place next to the canonical plan, for the reason the canonical plan is derived in one place:
+# publication writes the `runtime_aliases` of its release record from `.runtime[].alias` plus the
+# owner, and a report about a different set of names than the one it moves would be evidence about
+# nothing. `tests/canonical-tag-allocatability.sh` holds both sides to that.
+#
+# The SDK is absent on purpose. `rulego-plugin-sdk:abi-<id>` is named by its own identity, so there is
+# no second SDK name that could stand as a pointer to it, and inventing one would put a moving name
+# under a compile input that the runtime host names are deliberately not under.
+alias_tag_plan() {
+  local tags=${1:?rendered tags are required}
+  local owner=${2:?registry owner is required}
+
+  jq -r --arg owner "${owner}" '
+    [ .runtime | to_entries[] |
+        {identity: ("runtime-" + .key), target: ("ghcr.io/" + $owner + "/" + .value.alias)} ] |
+    .[] | [.identity, .target] | @tsv' <<<"${tags}"
+}
+
+# Reads what a moving name currently serves, without writing: <status>\t<held-by-abi-id>\t<digest>.
+#
+# Deliberately not `canonical_tag_probe`, which drops the digest because a canonical name has no
+# content of this lock's to compare against yet. For a moving name the digest is the point: the
+# question a reader asks about `v1.0.0-plugin` is which bytes the public name is serving right now,
+# and that is the only part of the answer not derivable from the lock. The retry discipline is shared
+# through `image_reference_digest`, so a rate limit is reported as `unreachable` here exactly as it is
+# there, and never as a name that is free.
+alias_reference_state() {
+  local target=${1:?image reference is required}
+  local status digest annotations held_by
+
+  status=0
+  digest=$(image_reference_digest "${target}") || status=$?
+  case ${status} in
+    0) ;;
+    1)
+      printf 'absent\t\t\n'
+      return 0
+      ;;
+    *)
+      printf 'unreachable\t\t\n'
+      return 0
+      ;;
+  esac
+
+  if ! annotations=$(docker buildx imagetools inspect "${target}" \
+    --format '{{json .Manifest}}' | jq -c '.annotations // {}'); then
+    printf 'unreachable\t\t\n'
+    return 0
+  fi
+  if ! held_by=$(jq -er '."io.rulego.abi.id" // "unlabelled"' <<<"${annotations}"); then
+    printf 'unreachable\t\t\n'
+    return 0
+  fi
+  printf 'occupied\t%s\t%s\n' "${held_by}" "${digest}"
+}
+
+# Says how a moving name's current holder relates to this contract: `current`, `predecessor`,
+# `unaccounted`, `absent`, or `unreachable`. None of them is a failure, and the function returns no
+# status that would let a caller make it one.
+#
+# An alias pointing at an earlier build is the ordinary state of a pointer, not a defect: the public
+# name follows a verified build only when `scripts/promote-runtime-aliases.sh` moves it, and a release
+# that has not run yet therefore correctly serves the last one that did. Reddening a pull request on
+# that would make the check permanently red on main, which is how a check gets weakened until it means
+# nothing. `unaccounted` is still worth naming in the report, because it is the state where the public
+# name serves an identity no record can explain -- and unlike a canonical collision this does not
+# block publication, so nothing else would ever mention it.
+alias_reference_verdict() {
+  local probe_status=${1:?probe status is required}
+  local held_by=${2:-}
+  local this_abi=${3:?this identity is required}
+  local predecessors=${4:?predecessor identities are required}
+
+  case ${probe_status} in
+    absent) printf 'absent\n' ;;
+    unreachable) printf 'unreachable\n' ;;
+    occupied)
+      if [[ ${held_by} == "${this_abi}" ]]; then
+        printf 'current\n'
+      elif canonical_predecessor_holds "${held_by}" "${predecessors}"; then
+        printf 'predecessor\n'
+      else
+        printf 'unaccounted\n'
+      fi
+      ;;
+    *) die "unknown alias probe status: ${probe_status}" ;;
+  esac
+}
+
+# A plan is a promise about every artifact this release owns, so its size is checked against the lock
+# rather than against the render that produced it. A canonical runtime name that came out null -- the
+# pre-build state, which only the probe may ask for -- would otherwise look like a smaller batch, and
+# the gate would approve a plan that no longer contains the hosts it exists to protect.
+require_canonical_plan_lines() {
+  local plan_file=${1:?canonical plan file is required}
+  local host_count=${2:?host count is required}
+  local lines
+  lines=$(wc -l <"${plan_file}" | tr -d ' ')
+  [[ ${lines} == $((1 + host_count)) ]] ||
+    die "canonical plan has ${lines} lines for ${host_count} hosts plus the SDK; a canonical name is missing from the plan"
 }
 
 # Classifies one canonical tag probe into a verdict, given the identity this lock claims and the

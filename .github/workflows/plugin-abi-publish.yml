@@ -138,6 +138,14 @@ jobs:
         env:
           PLUGIN_ABI_PUBLISH: "true"
         run: scripts/plugin-abi-publish.sh tmp/evidence
+      # The aliases move only after the immutable names are written and verified, so a published but
+      # unverified build never becomes what `v1.0.0-<host>` resolves to. A failure here is a real
+      # outcome and has to fail the job: the canonical name holds this build, the human-level name
+      # still points at an earlier one, and `tmp/alias-moves` says whether anything moved at all.
+      - name: Promote runtime aliases to the verified build
+        env:
+          PROMOTE_ALIAS_RECORD_DIR: ${{ github.workspace }}/tmp/alias-moves
+        run: scripts/promote-runtime-aliases.sh tmp/plugin-abi-release.json
       - name: Upload release record
         # actions/upload-artifact v4
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
@@ -147,3 +155,12 @@ jobs:
             tmp/plugin-abi-release.json
             tmp/published-sizes.tsv
           if-no-files-found: error
+      - name: Upload alias promotion records
+        # actions/upload-artifact v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: plugin-abi-alias-moves-${{ github.sha }}
+          path: tmp/alias-moves
+          # Absent means nothing moved: a release whose runtime names were all left to an accounted
+          # predecessor publishes an SDK and promotes no alias, and that is not a missing artefact.
+          if-no-files-found: ignore

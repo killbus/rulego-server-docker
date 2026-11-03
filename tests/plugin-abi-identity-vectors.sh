@@ -49,6 +49,18 @@ lock_digest_of() {
   printf 'sha256:%s\n' "$(canonical_lock_bytes "${1}" | hex_of)"
 }
 
+# The bytes the images actually carry. Before this file had a name for it, the only "canonical
+# bytes" were the whole lock, so a policy edit and an identity edit looked the same from here and
+# the gap could only be described in prose. `canonical_manifest` is what the SDK and both runtimes
+# embed, so this is the digest that a published name owes its content.
+canonical_manifest_bytes() {
+  jq -S -c '{abi_id, abi}' "${1}" | tr -d '\r'
+}
+
+manifest_digest_of() {
+  printf 'sha256:%s\n' "$(canonical_manifest_bytes "${1}" | hex_of)"
+}
+
 domain=tests/fixtures/plugin-abi-identity/domain.canonical
 [[ -f ${domain} ]] || die "the frozen identity domain is missing: ${domain}"
 
@@ -56,8 +68,9 @@ domain=tests/fixtures/plugin-abi-identity/domain.canonical
 # change to either cannot pass by re-stamping the value it is checked against. Renaming an
 # image, retargeting a runner or filling a ceiling is not something this file can be talked
 # into accepting: the bytes below are the contract.
-abi_id_v0=abi-b54242128c9bef3b3f839e8a7cba390111c5cd1768158a465716e2cabe55a01f
-lock_digest_v0=sha256:e628ccc9d149eab5d28e0ef9d6c49ecc50b9ff5aa5a39771df7cb7b6630deb24
+abi_id_v0=abi-af0e7765afa339934f9a8bc41b71bbe45176c48f173f5909732867c48fbd6bee
+lock_digest_v0=sha256:6fe67dfa5c99795c369e269ca74b73f34b0048344fad932c4feb768d7c5536b8
+manifest_digest_v0=sha256:94228ff6c6e3059a692fc186d5d695cf824c3f9c10d0d3a771343764fb6268a1
 
 [[ $(abi_of_lock_segment plugin-abi.lock) == "${abi_id_v0}" ]] ||
   die "the identity of the shipped lock moved off its frozen value: $(
@@ -86,8 +99,24 @@ cmp -s <(canonical_abi_bytes plugin-abi.lock) "${domain}" ||
 # value fails even when it moved. The label then asserts the direction separately against V0.
 # Comparing a `changes` vector for inequality against its own expected value would be the same
 # self-reference this file exists to remove, because the digest would agree with itself.
+#
+# Three digests are pinned per vector, because three different things can move: `abi_id` (the
+# identity), the canonical lock bytes (a file in this repository) and the canonical manifest bytes
+# (the document both published images carry). Only the first two used to be the same question; the
+# third is what made the gap below visible as a number. The manifest digests live in a sibling
+# fixture rather than inline, because they are the one column a policy edit is NOT expected to
+# move: a table with one row per vector makes a missing or stale row a failure of its own.
+manifest_vectors=tests/fixtures/plugin-abi-identity/manifest-digests.tsv
+[[ -f ${manifest_vectors} ]] || die "the frozen manifest digests are missing: ${manifest_vectors}"
+
+expected_manifest_of() {
+  awk -F '\t' -v name="${1}" '$1 == name { print $2; exit }' "${manifest_vectors}"
+}
+
 vector() {
-  local name=$1 filter=$2 expectation=$3 expected_abi=$4 expected_lock=$5 actual_abi actual_lock
+  local name=$1 filter=$2 expectation=$3 expected_abi=$4 expected_lock=$5
+  local expected_manifest
+  local actual_abi actual_lock actual_manifest
   jq "${filter}" plugin-abi.lock >"${test_root}/${name}.json" 2>"${test_root}/${name}.jq" ||
     die "${name}: mutation rejected by jq: $(cat "${test_root}/${name}.jq")"
   jq --arg id "abi-$(canonical_abi_bytes "${test_root}/${name}.json" |
@@ -98,27 +127,42 @@ vector() {
     die "${name}: not a legal lock: $(tail -n 1 "${test_root}/${name}.validate")"
   actual_abi=$(abi_of_lock_segment "${test_root}/${name}.stamped.json")
   actual_lock=$(lock_digest_of "${test_root}/${name}.stamped.json")
+  actual_manifest=$(manifest_digest_of "${test_root}/${name}.stamped.json")
+  # Derive mode prints what the production code computes and asserts nothing, which is the only
+  # honest way to regenerate the frozen values: a re-derivation that also judged them would grade
+  # its own homework. Used by hand when the identity function or the lock moves on purpose.
+  if [[ ${PLUGIN_ABI_DERIVE:-0} == 1 ]]; then
+    printf 'VECTOR\t%s\t%s\t%s\t%s\n' "${name}" "${actual_abi}" "${actual_lock}" "${actual_manifest}"
+    return 0
+  fi
+  expected_manifest=$(expected_manifest_of "${name}")
+  [[ -n ${expected_manifest} ]] ||
+    die "${name}: no frozen manifest digest for this vector; the table and the list have drifted"
   [[ ${actual_abi} == "${expected_abi}" ]] ||
     die "${name}: the identity moved off its frozen value: ${actual_abi}"
   [[ ${actual_lock} == "${expected_lock}" ]] ||
     die "${name}: the canonical lock bytes moved off their frozen value: ${actual_lock}"
+  [[ ${actual_manifest} == "${expected_manifest}" ]] ||
+    die "${name}: the bytes the images carry moved off their frozen value: ${actual_manifest}"
   case ${expectation} in
     stable)
       [[ ${expected_abi} == "${abi_id_v0}" ]] ||
         die "${name}: a stable vector must carry V0's identity"
-      # Every stable vector also has to change the canonical bytes, which is the recorded gap
-      # below stated structurally: the identity calls these fields policy while the SDK image
-      # carries them. If this ever goes red, the manifest stopped depending on the field, and
-      # the gap paragraph has to be re-read rather than deleted silently.
+      # The lock file still moves here -- it is repository content, and a policy edit really does
+      # change it. What must NOT move is the document the published images carry, asserted next.
       [[ ${expected_lock} != "${lock_digest_v0}" ]] ||
-        die "${name}: a policy field left the canonical bytes alone, so the recorded gap
-            no longer holds for it and the claim needs re-deriving"
+        die "${name}: a policy field left the lock file alone, so this vector no longer isolates
+            the field it claims to change and its digests cannot be re-derived from anything"
+      [[ ${expected_manifest} == "${manifest_digest_v0}" ]] ||
+        die "${name}: a field outside the identity domain changed the bytes the images carry"
       ;;
     changes)
       [[ ${expected_abi} != "${abi_id_v0}" ]] ||
         die "${name}: a field inside the identity domain left the identity unchanged"
       [[ ${expected_lock} != "${lock_digest_v0}" ]] ||
         die "${name}: a field inside the domain did not change the canonical bytes"
+      [[ ${expected_manifest} != "${manifest_digest_v0}" ]] ||
+        die "${name}: a field inside the identity domain left the embedded document unchanged"
       ;;
     *) die "${name}: unknown expectation" ;;
   esac
@@ -136,36 +180,36 @@ vector 'release-state-ready' \
      | .release.size_limits.arm64.sdk = '"${all_ceilings}"'
      | .release.size_limits.arm64.runtime.plugin = '"${all_ceilings}"'
      | .release.size_limits.arm64.runtime["ai-plugin"] = '"${all_ceilings}"'' \
-  stable "${abi_id_v0}" sha256:7f04998e0fd3c51b51015e1873594e1b5fb9d8cd3074b0e5f210c8710539d74b
+  stable "${abi_id_v0}" sha256:65b2c99655121d1692d6bbd11cae0408ed483636ad885ddc6562177a6940a572
 vector 'amd64-runner-label' '.release.ci.runners.amd64 = "ubuntu-24.04-alt"' \
-  stable "${abi_id_v0}" sha256:c3f929558c6fe5e134e968546c6c8ca5c0a698c47d8bbf6f7dff54982bbabdd1
+  stable "${abi_id_v0}" sha256:a9598752caa3b9ef781152fcfd9915b971676a8b8e57bd8e9fafdc86b4625f51
 vector 'sdk-repository-name' '.release.sdk_image = "rulego-plugin-sdk-alt"' \
-  stable "${abi_id_v0}" sha256:704fe4f230d2c17082d47953709bf971da45f4d09c0b0dfe408d2f26eb74be34
+  stable "${abi_id_v0}" sha256:ab04003ed21a321aacabc3fcddd1423024d915b685ba48cea7f3db1426828b64
 vector 'runtime-repository-name' '.release.runtime_image = "rulego-server-alt"' \
-  stable "${abi_id_v0}" sha256:ea6c75b728804b1bfee3dde7fb4163cfc77aa984be018964fca457a056a3a362
+  stable "${abi_id_v0}" sha256:03f8f366ec59edab7aed00b28c2270e3ea2c500f6e763098e010969df615e341
 vector 'embedded-manifest-path' '.release.manifest_path = "/other/plugin-abi.json"' \
-  stable "${abi_id_v0}" sha256:e9622ec92b21f815039060462072bde178e85b4bd83af7567ca37db90c75621c
+  stable "${abi_id_v0}" sha256:26bd703bebe39b79a94cf0b4cc7fee801946ea4efdd3265a5366bd05db31aabf
 vector 'reproducible-epoch' '.release.reproducible_epoch = 1700000001' \
-  stable "${abi_id_v0}" sha256:cccf3cd5d36d80a03ace23976d059b50f5d1714db7fc0bc65224f18a49046811
+  stable "${abi_id_v0}" sha256:a01ec9da101dc7cbab8f84ec94e359cf394845ef1b60f4dd1ba47cae74d31bc4
 vector 'editor-asset-digest' \
   '.release.editor_payload.asset.sha256 =
      "0000000000000000000000000000000000000000000000000000000000000001"' \
-  stable "${abi_id_v0}" sha256:b71c9019185fe1f96040375b6c39400761f16c701d31408786fe9985b4604f35
+  stable "${abi_id_v0}" sha256:3b24cae10a9cee6042abac5bac511e550450564595792ebf233903a7a5d55134
 vector 'previous-sdk-index-digest' \
   '.compatibility.previous_sdk.index_digest =
      "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"' \
-  stable "${abi_id_v0}" sha256:d9134c82ddcd7a19100bd4d6b0db88087ab15d4659ce34dad890f6d32983ddb7
+  stable "${abi_id_v0}" sha256:0fa5e1ef5a25fc49f578b9c210929822827a34b3dfa70e91d5bec936bf58b76a
 
 # Changes: fields inside the domain. Both the identity and the canonical bytes are frozen, so
 # the direction and the magnitude are each asserted separately.
 vector 'go-version' '.abi.go.version = "1.25.1"' \
-  changes abi-3eb7ff4bbbd0b3df6d56f716e9b297b625f3fc230c969b0dedce11582ab1663a \
-    sha256:bc18bc325c549be19ffcfd4e65c040ee799e369c37905c190bc5fd98421e4b53
+  changes abi-a577d039a624a73ade51bd7466f1782b91f05073ab5d26825d2c838fb0cbb5d1 \
+    sha256:db958869d3c0f94157b745077de1a00d416d4a82ea16bf21cea02ea6ca8142b2
 vector 'module-graph-list-digest' \
   '.abi.module_graph.list_sha256 =
      "0000000000000000000000000000000000000000000000000000000000000001"' \
-  changes abi-ccd9f2425825113d2d5d5abd90638dba143d9e71735d657fe05588b0bc2a79fe \
-    sha256:9daa306ba0476f9765ae30c6870846a2f8fd0a8e91d3ed326fb38097f0722965
+  changes abi-ad0cf58959b60a9589640094cfaedc02d6488340ade20242b076e6d0403d8af8 \
+    sha256:af1a90702f13eec34f9bbc66016cd52c7f0482e0e3c06d805a26a2995f4bbfeb
 # A new host must carry a ceiling entry because the schema keys ceilings off the host list.
 # Copying the sibling's value instead of writing nulls keeps this vector legal in either
 # release state: null under measurement, positive under ready. Hardcoding null here made it a
@@ -178,38 +222,83 @@ vector 'host-list-grows' \
          .release.size_limits.amd64.runtime.plugin
      | .release.size_limits.arm64.runtime["all-plugin"] =
          .release.size_limits.arm64.runtime.plugin' \
-  changes abi-47d47a97dada15437d43400e2efdb3d10225c2cb8a5d59aa4808cc5ca1ace23c \
-    sha256:9b856d8514bff55856f571215d0382f39b9169e36f702affdf11e10f4db27154
+  changes abi-851b2d7c4c718b50c26aebcbfd2121cfcc8da45f986a73bac0996fcaa3113a6e \
+    sha256:24e4087e078d7d78494ab0df189e3c18cb4d866a96cf041dfa06b18169c9b6d0
 vector 'host-tags-cleared' '.abi.build.hosts[1].tags = []' \
-  changes abi-45e475c913be11e2f55dfc55f8bcbff850badc7885d294fc48987f014e70de57 \
-    sha256:38876ee6e655f833dd73737e035d68633bcc9fbec5a78011ed8902cce771386d
+  changes abi-272891d9dbf887f4c67c62e8e403eb293d7e34d3b2fd7741f00c476d664aa345 \
+    sha256:2224d14719aa5f59d86f1e8402a61fb31e277b7c0d945d3599d15893012dc9a4
 # The recipe is inside the domain. A packaging generation that moves must move the identity, because
 # that is the mechanism by which new bytes arrive under a name nobody has spent: measured on the live
 # registry, `abi-f972e691` and `abi-78737478` are canonical tags held by artifacts this recipe cannot
 # reproduce, and without this field the only remedy left to the gate was to wait for an upstream
 # release version.
-vector 'packaging-generation' '.abi.packaging.version = "3"' \
-  changes abi-af0e7765afa339934f9a8bc41b71bbe45176c48f173f5909732867c48fbd6bee \
-    sha256:6fe67dfa5c99795c369e269ca74b73f34b0048344fad932c4feb768d7c5536b8
+vector 'packaging-generation' '.abi.packaging.version = "4"' \
+  changes abi-c47c1fe983d1bcefeb1bef05f87f72ae12d839c1a976a2732dba581f59da57a2 \
+    sha256:1ad4f0cdedcef2b1a2cbc4f74ca5f1ff9a70e2527a90380dfb94a73ea812a242
 
-# The gap this file exists to keep visible rather than to freeze as correct.
+# The gap this file used to record, and the four ways it is now closed.
 #
 # `20cc5f4` argued that packaging fields must not rename an image because they are not compiled
-# into one. Measured, that is not the whole truth: `render manifest` canonicalizes the WHOLE
-# lock, that manifest is copied into the SDK image, `render sdk-env` writes LOCK_DIGEST into
-# /opt/rulego/build.env, and the SDK's own RUN asserts sha256(/abi-manifest.json) ==
-# LOCK_DIGEST. So a policy-only edit leaves the identity alone while changing the bytes of the
-# image that identity names, and two locks that differ only in ceilings would claim one ABI.
-# The epoch vector above already carries both halves: same identity, different canonical bytes.
-# Asserted explicitly here so the mismatch is stated, and so closing the gap by deriving the
-# manifest from the identity domain flips this red and gets reviewed instead of passing unseen.
+# into one. Measured, that was not the whole truth: `render manifest` canonicalized the WHOLE
+# lock, that manifest was copied into the SDK image, `render sdk-env` wrote LOCK_DIGEST into
+# /opt/rulego/build.env, and the SDK's own RUN asserted sha256(/abi-manifest.json) == LOCK_DIGEST.
+# A policy-only edit therefore left the identity alone while moving the bytes of the image that
+# identity names. The fix was to stop the lock's release half from reaching an image at all.
+# Each assertion below is a refusal, so the gap can only reopen by being noticed.
+epoch_lock=$(lock_digest_of "${test_root}/reproducible-epoch.stamped.json")
+epoch_manifest=$(manifest_digest_of "${test_root}/reproducible-epoch.stamped.json")
+
+# Derive mode stops here and reports what the shipped lock actually is, so the frozen literals can
+# be rewritten from measurements instead of from the values they are about to be checked against.
+if [[ ${PLUGIN_ABI_DERIVE:-0} == 1 ]]; then
+  printf 'V0\t%s\t%s\t%s\n' "${abi_id_v0}" "${lock_digest_v0}" \
+    "$(manifest_digest_of plugin-abi.lock)"
+  exit 0
+fi
+
 [[ $(jq -r '.abi_id' "${test_root}/reproducible-epoch.stamped.json") == "${abi_id_v0}" ]] ||
   die 'the epoch is supposed to leave the identity alone'
-[[ $(lock_digest_of "${test_root}/reproducible-epoch.stamped.json") != "${lock_digest_v0}" ]] ||
-  die 'a policy-only edit must change the canonical bytes the SDK image carries'
-grep -Fq 'LOCK_DIGEST' <(scripts/plugin-abi.sh render sdk-env amd64) ||
-  die 'the SDK build environment no longer carries the lock digest this gap depends on'
-grep -Fq 'sha256sum /abi-manifest.json' Dockerfile.plugin-sdk ||
-  die 'the SDK recipe no longer asserts the manifest against the lock digest'
+[[ ${epoch_lock} != "${lock_digest_v0}" ]] ||
+  die 'the epoch vector stopped changing the lock file, so it measures nothing'
+[[ ${epoch_manifest} == "${manifest_digest_v0}" ]] ||
+  die 'a policy-only edit moved the document the published images carry: the gap is open again'
 
-echo 'Plugin ABI golden identity vectors passed: 13 vectors and 1 recorded gap.'
+# The manifest carries the identity and nothing else. Checked by shape rather than by a digest
+# comparison, because a digest can be re-stamped and a key set cannot be argued into agreement.
+[[ $(scripts/plugin-abi.sh render manifest | jq -r 'keys | join(",")') == "abi,abi_id" ]] ||
+  die 'the embedded manifest reached outside the identity domain'
+
+# The SDK environment is a file inside the image, so it must carry the identity document's digest
+# and must not carry the lock's. Presence of the first and absence of the second are both asserted:
+# deleting the export would otherwise pass as a fix.
+sdk_env=$(scripts/plugin-abi.sh render sdk-env amd64)
+grep -Fq 'ABI_MANIFEST_DIGEST=' <<<"${sdk_env}" ||
+  die 'the SDK build environment no longer carries the digest of what the image embeds'
+if grep -Fq 'LOCK_DIGEST=' <<<"${sdk_env}"; then
+  die 'the whole-lock digest is back inside the SDK build environment'
+fi
+
+# The image labels are child-config bytes, so the same rule applies to them, and the recipe has to
+# check the file it ships against the value that ships with it.
+labels=$(scripts/plugin-abi.sh render metadata plugin-sdk amd64)
+grep -Fq 'io.rulego.abi.manifest.digest' <<<"${labels}" ||
+  die 'the SDK label set no longer names the embedded document'
+if grep -Fq 'io.rulego.abi.lock.digest' <<<"${labels}"; then
+  die 'the SDK label set pins the whole lock again'
+fi
+# The two halves have to appear on the same line: a recipe that mentions the variable and compares
+# the file to something else would otherwise pass a name-only grep.
+grep -Eq 'sha256:.*sha256sum /abi-manifest\.json.*= "\$\{ABI_MANIFEST_DIGEST\}"' Dockerfile.plugin-sdk ||
+  die 'the SDK recipe no longer compares the shipped manifest to the identity-document digest'
+
+# Where the whole lock still belongs: outside the image, answered on demand. The record and the
+# evidence both cite it, and a reader who wants the file itself can still get its digest.
+[[ $(scripts/plugin-abi.sh render lock-digest) == "${lock_digest_v0}" ]] ||
+  die 'the lock digest stopped being computable outside the image'
+
+if [[ ${PLUGIN_ABI_DERIVE:-0} == 1 ]]; then
+  printf 'V0\t%s\t%s\t%s\n' "${abi_id_v0}" "${lock_digest_v0}" "${manifest_digest_v0}"
+  printf 'LOCK_V0\t%s\n' "${lock_digest_v0}"
+else
+  printf 'Plugin ABI golden identity vectors passed: 13 vectors, and the release half of the lock is out of the image bytes.\n'
+fi

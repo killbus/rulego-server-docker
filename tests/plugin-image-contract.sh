@@ -116,6 +116,17 @@ assert_contains "${publish_workflow}" 'run: scripts/plugin-abi-build.sh "${{ mat
 assert_contains "${publish_workflow}" 'run: scripts/plugin-abi-publish.sh tmp/evidence'
 assert_contains "${publish_workflow}" 'environment: plugin-abi-release'
 assert_contains "${publish_workflow}" 'packages: write'
+# The alias promotion is a separate step, run after the immutable names are written and verified. Its
+# position is the contract: a step that moved `v1.0.0-<host>` before verification would advertise
+# content nothing checked, and that is the exact ordering the two-phase publication exists to forbid.
+# It is also given the record that publish writes, not a digest assembled from step outputs.
+assert_contains "${publish_workflow}" 'run: scripts/promote-runtime-aliases.sh tmp/plugin-abi-release.json'
+publish_step_line=$(grep -Fn 'run: scripts/plugin-abi-publish.sh tmp/evidence' "${publish_workflow}" | cut -d: -f1)
+promote_step_line=$(grep -Fn 'run: scripts/promote-runtime-aliases.sh' "${publish_workflow}" | cut -d: -f1)
+(( ${promote_step_line} > ${publish_step_line} )) || {
+  echo 'the runtime alias promotion runs before the immutable publication it is licensed by' >&2
+  exit 1
+}
 if grep -Fq 'packages: write' "${verify_workflow}"; then
   echo 'ordinary Plugin ABI verification requested package-write permission' >&2
   exit 1

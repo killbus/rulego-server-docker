@@ -18,7 +18,11 @@ die() {
 # shellcheck disable=SC1090
 source "${build_environment}"
 
-[[ "sha256:$(sha256sum "${manifest}" | awk '{print $1}')" == "${LOCK_DIGEST}" ]] || die 'Plugin ABI manifest digest mismatch'
+# The manifest is the identity document, and this is the one check that the file the image carries is
+# the file the build environment was generated from. The whole-lock digest is not available here by
+# design: it would put release policy inside the image bytes.
+[[ "sha256:$(sha256sum "${manifest}" | awk '{print $1}')" == "${ABI_MANIFEST_DIGEST}" ]] ||
+  die 'Plugin ABI manifest digest mismatch'
 host_found=false
 IFS=';' read -r -a host_variants <<<"${HOST_VARIANTS}"
 for host_variant in "${host_variants[@]}"; do
