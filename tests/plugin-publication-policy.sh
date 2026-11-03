@@ -166,6 +166,28 @@ decision_case 'registry silent' unreachable unreachable '' "${other}" "${want}" 
 # between a contract fact and a guess.
 decision_case 'no predecessor recorded' collision occupied "${prev_abi}" "${other}" "${want}" "${this_abi}" ""
 
+# Two spent names, one slot. Measured on the live registry after the first real publication:
+# `v1.0.0-plugin` is held by the contract this lock replaced, and `v1.0.0-ai-plugin` is held by a
+# cast made under an identity function the current lock no longer evaluates. Accounting for either
+# one alone leaves the other a collision, and a collision refuses the whole batch -- so the gate
+# would say "no tag written" about a release whose own names are all free. The set form is what
+# makes "this name is explained" a recorded fact rather than a choice of which name to explain.
+predecessor_set=$(printf '%s\n%s\n' "${prev_abi}" 'abi-99999999')
+decision_case 'first of two recorded predecessors' superseded occupied \
+  "${prev_abi}" "${other}" "${want}" "${this_abi}" "${predecessor_set}"
+decision_case 'second of two recorded predecessors' superseded occupied \
+  'abi-99999999' "${other}" "${want}" "${this_abi}" "${predecessor_set}"
+decision_case 'a holder outside both' collision occupied \
+  'abi-88888888' "${other}" "${want}" "${this_abi}" "${predecessor_set}"
+# Exact membership, not prefix matching: a recorded predecessor must not vouch for a longer
+# identity that merely starts the same way.
+decision_case 'a longer identity sharing a predecessor prefix' collision occupied \
+  'abi-99999999aa' "${other}" "${want}" "${this_abi}" "${predecessor_set}"
+# Content equality still outranks provenance: our own digest on a name another accounted identity
+# once held remains a no-op, exactly as it does with a single predecessor.
+decision_case 'noop beats set membership' noop occupied \
+  'abi-99999999' "${want}" "${want}" "${this_abi}" "${predecessor_set}"
+
 # The gate's real job: a name owned by the contract this lock supersedes must not hold the rest of
 # the batch hostage. These two lines are one batch where the runtime tag belongs to the lock's
 # recorded predecessor and the SDK tag is this build's, so the old digest-only rule refused both.
