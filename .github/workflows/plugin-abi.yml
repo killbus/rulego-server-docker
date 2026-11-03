@@ -55,6 +55,13 @@ jobs:
           # separately as abi_id and lock_digest.
           PLUGIN_ABI_PROBE_REVISION: ${{ github.event.pull_request.head.sha }}
         run: scripts/probe-canonical-tags.sh --record tmp/canonical-tag-allocatability.json
+      # The compatibility record names two registry digests that no offline rule can compute, so a
+      # mistyped one passes every repository check and surfaces only when a release pulls the
+      # previous SDK image by digest. This resolves the recorded tag anonymously and compares the
+      # index and both architecture images with what the lock claims; it writes nothing.
+      - name: Check the recorded compatibility SDK against the registry
+        run: scripts/derive-compatibility-sdk.sh check
+
       - name: Upload the allocatability record
         # actions/upload-artifact v4
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02

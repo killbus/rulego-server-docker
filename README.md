@@ -268,6 +268,31 @@ scripts/fetch-release.sh v1.0.0 standard
 scripts/fetch-release.sh v1.0.0 all
 ```
 
+The compatibility record in `plugin-abi.lock` names the published SDK image that
+the previous-generation probe loads. Two of its four values are registry digests
+that nothing in this repository computes, so they are never typed by hand: a wrong
+digit still validates, and only the probe would notice. Point the helper at the
+revision whose lock was the released contract and paste what it prints:
+
+```bash
+block=$(scripts/derive-compatibility-sdk.sh derive <revision-of-the-previous-release>)
+jq --argjson block "${block}" '.compatibility.previous_sdk = $block' \
+  plugin-abi.lock >next.lock && mv next.lock plugin-abi.lock
+scripts/plugin-abi.sh validate --candidate
+```
+
+The helper reads the identity from that revision's lock and the digests from the
+registry, and refuses rather than guess: no lock in the revision, a lock that is
+not a valid contract, a tag nobody published, a registry that would not answer, an
+index missing an architecture, an index that resolves both architectures to one
+digest, or a tag that moved between its two reads.
+
+`scripts/derive-compatibility-sdk.sh check` reads the other way round: it takes the
+record the lock already carries and compares it with the published index and both
+architecture images. The pull-request job that probes canonical tags runs it on
+every change, so a record that names bytes nobody published fails before merge
+rather than at the release that would have pulled them.
+
 Run the local static and failure-injection gates with:
 
 ```bash

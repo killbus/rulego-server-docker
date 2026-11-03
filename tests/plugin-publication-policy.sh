@@ -269,7 +269,6 @@ fi
 # from the identity the lock records, never from a digest guess.
 this_abi=abi-cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
 prev_abi=abi-dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
-held_index=sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff
 
 decision_case() {
   local description=$1 want_out=$2; shift 2
