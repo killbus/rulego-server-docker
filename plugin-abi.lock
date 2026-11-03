@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "abi_id": "abi-7ef7f30db8598b7fdce710287df49bdb047d165749b749fe86c0ef448daf0c3f",
+  "abi_id": "abi-b54242128c9bef3b3f839e8a7cba390111c5cd1768158a465716e2cabe55a01f",
   "abi": {
     "go": {
       "version": "1.25.0",
@@ -65,7 +65,8 @@
       "host_workspace": "off",
       "plugin_workspace": "generated-server-and-plugin",
       "plugin_symbol": "Plugins"
-    }
+    },
+    "packaging": {"version": "2"}
   },
   "compatibility": {
     "previous_sdk": {
