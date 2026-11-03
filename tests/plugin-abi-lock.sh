@@ -27,6 +27,23 @@ jq -e '.include | map(.platform) == ["linux/amd64", "linux/arm64"]' \
   <<<"$(scripts/plugin-abi.sh render matrix)" >/dev/null
 jq -e '."io.rulego.abi.platforms" == "linux/amd64,linux/arm64" and has("io.rulego.abi.platform") == false' \
   <<<"$(scripts/plugin-abi.sh render metadata plugin-sdk)" >/dev/null
+# The rendered annotations may not vary with the commit that packaged the image. A per-commit value
+# inside the image config moves the child digest, and the pipeline rests on the child digest being a
+# function of the lock alone; `scripts/plugin-abi-build.sh` states that claim and the reproducibility
+# recheck enforces it on a real runner. Pinned here so the recipe cannot quietly re-open it.
+metadata_sdk=$(scripts/plugin-abi.sh render metadata plugin-sdk amd64)
+[[ ${metadata_sdk} == "$(GITHUB_SHA=1111111111111111111111111111111111111111 \
+  scripts/plugin-abi.sh render metadata plugin-sdk amd64)" ]] || {
+  echo 'rendered image annotations depend on the packaging commit' >&2
+  exit 1
+}
+jq -e --arg revision "$(jq -er '.abi.rulego_server.revision' plugin-abi.lock)" \
+  '."org.opencontainers.image.revision" == $revision and
+   ."org.opencontainers.image.source" == "https://github.com/rulego/rulego" and
+   ."org.opencontainers.image.licenses" == "Apache-2.0"' <<<"${metadata_sdk}" >/dev/null || {
+  echo 'image annotations must name the source revision the lock records' >&2
+  exit 1
+}
 jq -e '."io.rulego.abi.platform" == "linux/arm64" and ."io.rulego.server.release" == "v1.0.0" and
   ."org.opencontainers.image.version" == "v1.0.0-plugin" and has("io.rulego.abi.platforms") == false' \
   <<<"$(scripts/plugin-abi.sh render metadata plugin-runtime arm64)" >/dev/null

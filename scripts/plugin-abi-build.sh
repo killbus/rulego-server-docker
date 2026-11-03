@@ -61,20 +61,18 @@ printf 'module example.com/rulego-abi-probe\n\ngo %s\n\nrequire %s %s\n' \
   "$(jq -er '.rulego_core.module' <<<"${build_json}")" \
   "$(jq -er '.rulego_core.version' <<<"${build_json}")" >"${probe_source}/go.mod"
 
-source_url=${GITHUB_SERVER_URL:-https://github.com}/${GITHUB_REPOSITORY:?GITHUB_REPOSITORY is required}
 packaging_revision=${GITHUB_SHA:?GITHUB_SHA is required}
 [[ ${packaging_revision} =~ ^[0-9a-f]{40}$ ]] || die 'GITHUB_SHA must be a full lowercase commit revision'
+# This value qualifies staging tag names and the release record only. It must not reach image
+# bytes: a per-commit label moves the child digest of every artifact, which makes an unchanged
+# contract impossible to republish. See `render metadata` in scripts/plugin-abi.sh.
 
 label_args() {
   local variant=$1 host_id=${2:-plugin} label
   IMAGE_LABELS=()
   while IFS= read -r label; do IMAGE_LABELS+=(--label "${label}"); done < <(
-    "${script_dir}/plugin-abi.sh" render metadata "${variant}" "${arch}" "${host_id}" \
-      | jq -r 'to_entries[] | "\(.key)=\(.value)"'
-    printf '%s\n' \
-      "org.opencontainers.image.source=${source_url}" \
-      "org.opencontainers.image.revision=${packaging_revision}" \
-      'org.opencontainers.image.licenses=Apache-2.0'
+    "${script_dir}/plugin-abi.sh" render metadata "${variant}" "${arch}" "${host_id}" |
+      jq -r 'to_entries[] | "\(.key)=\(.value)"'
   )
 }
 
@@ -222,9 +220,7 @@ verify_child() {
   local variant=$1 ref=$2 host_id=${3:-plugin} expected labels container copied
   retry_command 4 2 docker pull --platform "${platform}" "${ref}" >/dev/null
   labels=$(docker image inspect "${ref}" --format '{{json .Config.Labels}}')
-  expected=$("${script_dir}/plugin-abi.sh" render metadata "${variant}" "${arch}" "${host_id}" | jq -c \
-    --arg source "${source_url}" --arg revision "${packaging_revision}" \
-    '. + {"org.opencontainers.image.source":$source,"org.opencontainers.image.revision":$revision,"org.opencontainers.image.licenses":"Apache-2.0"}')
+  expected=$("${script_dir}/plugin-abi.sh" render metadata "${variant}" "${arch}" "${host_id}")
   jq -e --argjson expected "${expected}" '. as $labels | $expected | to_entries | all(.[]; $labels[.key] == .value)' \
     <<<"${labels}" >/dev/null || die "${variant} child labels differ from the lock"
   container=$(docker create --platform "${platform}" "${ref}")

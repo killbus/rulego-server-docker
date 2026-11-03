@@ -64,6 +64,21 @@ assert_contains scripts/plugin-abi-build.sh 'load "${runtime_ref}" "${arch}" "${
 assert_contains scripts/plugin-abi-build.sh '--entrypoint /usr/local/bin/build-plugin-host'
 assert_contains scripts/plugin-abi-build.sh 'Dockerfile.plugin-runtime'
 assert_contains scripts/plugin-abi-build.sh 'staging-${packaging_revision}-${arch}${tag_suffix}'
+# Image bytes are decided by the lock, not by which commit ran the build. A per-commit value in an
+# image label or an index annotation moves the child digest of every artifact, so a canonical tag
+# could never compare equal to its own content and republishing an unchanged contract would read as
+# a conflict. These annotations therefore come from one file only: the lock renderer.
+for annotation_recipe in scripts/plugin-abi-build.sh scripts/plugin-abi-publish.sh scripts/verify-plugin-oci.sh; do
+  if grep -Fq 'org.opencontainers.image.' "${annotation_recipe}"; then
+    printf '%s composes OCI annotations instead of taking them from scripts/plugin-abi.sh render metadata\n' \
+      "${annotation_recipe}" >&2
+    exit 1
+  fi
+done
+if grep -R -E -q 'PLUGIN_ABI_PACKAGING_[A-Z]+=' scripts .github tests; then
+  echo 'a packaging-derived annotation channel puts per-commit bytes back into published images' >&2
+  exit 1
+fi
 assert_contains scripts/plugin-abi-build.sh '--env "RULEGO_HOST_ID=${host_id}"'
 assert_contains scripts/build-plugin-host 'IFS='"'"';'"'"' read -r -a host_variants <<<"${HOST_VARIANTS}"'
 if grep -Eq '(^|[^[:alnum:]_])jq([^[:alnum:]_]|$)' scripts/build-plugin-host; then

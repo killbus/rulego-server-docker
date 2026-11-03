@@ -318,7 +318,16 @@ render_metadata() {
       "io.rulego.go.version": .abi.go.version,
       "io.rulego.libc.family": .abi.native.libc,
       "io.rulego.libc.minimum": .abi.native.minimum_version,
-      "org.opencontainers.image.version": (if $variant == "plugin-sdk" then .abi_id else .abi.rulego_server.release_version + $host.tag_suffix end)
+      "org.opencontainers.image.version": (if $variant == "plugin-sdk" then .abi_id else .abi.rulego_server.release_version + $host.tag_suffix end),
+      # The three OCI-standard annotations describe the source these bytes were compiled from, which
+      # is the upstream revision the lock records, not the commit of this packaging repository that
+      # ran the build. A per-commit value in the image config moves the child digest on every build,
+      # so republishing an unchanged contract never compares equal and every rerun reads as a
+      # conflict. Which commit packaged a release is recorded three times outside the bytes: the
+      # staging tag name, the release record, and the SLSA attestation.
+      "org.opencontainers.image.source": .abi.rulego_server.repository,
+      "org.opencontainers.image.revision": .abi.rulego_server.revision,
+      "org.opencontainers.image.licenses": "Apache-2.0"
     } + if $variant == "plugin-runtime" then {
       "io.rulego.abi.host": $host.id
     } else {

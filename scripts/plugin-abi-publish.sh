@@ -21,7 +21,11 @@ abi_id=$("${script_dir}/plugin-abi.sh" render id)
 lock_digest=$("${script_dir}/plugin-abi.sh" render lock-digest)
 packaging_revision=${GITHUB_SHA:?GITHUB_SHA is required}
 [[ ${packaging_revision} =~ ^[0-9a-f]{40}$ ]] || die 'GITHUB_SHA must be a full lowercase commit revision'
-source_url=${GITHUB_SERVER_URL:-https://github.com}/${GITHUB_REPOSITORY:?GITHUB_REPOSITORY is required}
+# `packaging_revision` qualifies staging tag names and the release record only. It is deliberately
+# absent from index annotations and image labels: a per-commit value there moves a digest on every
+# build, so a canonical tag could never compare equal to its own content and could not be republished
+# without reading as a conflict. Which commit packaged a release stays in the SLSA attestation, which
+# buildx writes per invocation anyway.
 owner=${GITHUB_REPOSITORY_OWNER:?GITHUB_REPOSITORY_OWNER is required}
 owner=${owner,,}
 tags=$("${script_dir}/plugin-abi.sh" render tags)
@@ -105,10 +109,6 @@ index_annotations() {
   while IFS= read -r annotation; do INDEX_ANNOTATIONS+=(--annotation "index:${annotation}"); done < <(
     "${script_dir}/plugin-abi.sh" render metadata "${variant}" '' "${host_id}" |
       jq -r 'to_entries[] | "\(.key)=\(.value)"'
-    printf '%s\n' \
-      "org.opencontainers.image.source=${source_url}" \
-      "org.opencontainers.image.revision=${packaging_revision}" \
-      'org.opencontainers.image.licenses=Apache-2.0'
   )
 }
 
@@ -158,8 +158,6 @@ while IFS=$'\t' read -r host_id runtime_index; do
 done < <(jq -r 'to_entries[] | [.key, .value] | @tsv' <<<"${runtime_staging_indexes}")
 
 PLUGIN_ABI_SIZE_REPORT=${TMPDIR}/staging-sizes.tsv \
-PLUGIN_ABI_PACKAGING_SOURCE=${source_url} \
-PLUGIN_ABI_PACKAGING_REVISION=${packaging_revision} \
   "${script_dir}/verify-plugin-oci.sh" "${sdk_staging_index}" "${runtime_staging_indexes}" release
 
 # Every canonical tag is probed before the first write so a conflicting tag
@@ -198,8 +196,6 @@ while IFS= read -r host_id; do
 done < <(jq -r '.hosts[].id' <<<"${ci_json}")
 
 PLUGIN_ABI_SIZE_REPORT=${TMPDIR}/published-sizes.tsv \
-PLUGIN_ABI_PACKAGING_SOURCE=${source_url} \
-PLUGIN_ABI_PACKAGING_REVISION=${packaging_revision} \
   PLUGIN_ABI_SUPERSEDED_HOSTS="${superseded_hosts}" \
   "${script_dir}/verify-plugin-oci.sh" "${sdk_ref}" "${runtime_refs}" release
 
