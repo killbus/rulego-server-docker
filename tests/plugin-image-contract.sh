@@ -101,7 +101,7 @@ if grep -R -Fq 'all(. as ' -- scripts; then
   exit 1
 fi
 assert_contains scripts/plugin-abi-publish.sh 'publish_immutable_image_tag'
-assert_contains scripts/lib.sh 'immutable tag already points to a different digest'
+assert_contains scripts/lib.sh 'immutable tag already resolves to different images'
 assert_contains scripts/plugin-abi-publish.sh 'verify-plugin-oci.sh'
 assert_contains scripts/plugin-abi-publish.sh 'expected_staging=${runtime_repository}:staging-${packaging_revision}-${arch}${tag_suffix}'
 assert_contains scripts/plugin-abi-publish.sh 'runtime_staging_indexes='

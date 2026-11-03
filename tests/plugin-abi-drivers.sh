@@ -79,7 +79,7 @@ if grep -Eq 'legacy_sdk_ref=.*rulego-plugin-sdk:|compatibility\.previous_sdk\.re
   exit 1
 fi
 grep -Fq 'publish_immutable_image_tag' scripts/plugin-abi-publish.sh
-grep -Fq 'immutable tag already points to a different digest' scripts/lib.sh
+grep -Fq 'immutable tag already resolves to different images' scripts/lib.sh
 # The pre-write probe must stay wired into publication, not just defined.
 grep -Fq 'require_immutable_tags_publishable "${canonical_plan}"' scripts/plugin-abi-publish.sh
 # Every canonical write must come after the probe, so a conflict leaves no

@@ -13,6 +13,12 @@ trap 'rm -rf -- "${test_root}"' EXIT
 
 expected=sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 other=sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+# This build's two per-architecture images. A canonical index is assembled from them plus one
+# attestation member each, and those members describe the invocation that wrote them, so the index
+# digest is the one fact about a published release that cannot repeat.
+amd64_child=sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+arm64_child=sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
+foreign_amd64_child=sha256:eaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaea
 target=registry.example:5000/rulego-server:abi-test-plugin
 source_ref=registry.example:5000/rulego-server@${expected}
 state=${test_root}/published
@@ -48,6 +54,31 @@ docker() {
       printf '{"annotations":{"io.rulego.abi.id":"%s"}}\n' "${MOCK_HELD_BY}"
       return
     fi
+    if [[ -n ${MOCK_CHILD_STATE:-} ]]; then
+      # One inspect answers both questions publication asks about a tag: which images it resolves
+      # to, and which identity publication labelled it with when the tag was first written. The
+      # index digest reported is `other`, never this build's, so a green verdict here cannot come
+      # from the digest comparison that publication used to rely on.
+      local annotations='{}' children
+      [[ -z ${MOCK_HELD_BY:-} ]] ||
+        annotations=$(printf '{"io.rulego.abi.id":"%s"}' "${MOCK_HELD_BY}")
+      case ${MOCK_CHILD_STATE} in
+        ours)
+          children=$(printf '[{"platform":{"os":"linux","architecture":"amd64"},"digest":"%s"},{"platform":{"os":"linux","architecture":"arm64"},"digest":"%s"}]' \
+            "${amd64_child}" "${arm64_child}")
+          ;;
+        foreign)
+          children=$(printf '[{"platform":{"os":"linux","architecture":"amd64"},"digest":"%s"},{"platform":{"os":"linux","architecture":"arm64"},"digest":"%s"}]' \
+            "${foreign_amd64_child}" "${arm64_child}")
+          ;;
+        *)
+          printf 'unexpected child state: %s\n' "${MOCK_CHILD_STATE}" >&2
+          return 64
+          ;;
+      esac
+      printf '{"digest":"%s","manifests":%s,"annotations":%s}\n' "${other}" "${children}" "${annotations}"
+      return
+    fi
     if [[ ${MOCK_INDEX_STATE:?} == complete ]]; then
       printf '{"manifests":[{"platform":{"os":"linux","architecture":"arm64"},"digest":"%s"},{"platform":{"os":"linux","architecture":"amd64"},"digest":"%s"}]}\n' \
         "${other}" "${expected}"
@@ -65,27 +96,58 @@ docker() {
 
 MOCK_TAG_STATE=matching
 export MOCK_TAG_STATE
-result=$(publish_immutable_image_tag "${target}" "${source_ref}")
+result=$(publish_immutable_image_tag "${target}" "${source_ref}" "${amd64_child}" "${arm64_child}")
 [[ ${result} == "registry.example:5000/rulego-server@${expected}" && ! -e ${docker_log} ]]
 
 MOCK_TAG_STATE=absent
 rm -f -- "${state}" "${docker_log}"
-result=$(publish_immutable_image_tag "${target}" "${source_ref}")
+result=$(publish_immutable_image_tag "${target}" "${source_ref}" "${amd64_child}" "${arm64_child}")
 [[ ${result} == "registry.example:5000/rulego-server@${expected}" ]]
 [[ $(wc -l <"${docker_log}") == 1 ]]
 
 for mode in mismatched error; do
   MOCK_TAG_STATE=${mode}
+  # Neither refusal may be talking itself out of: the tag has to resolve to images this build did
+  # not produce, otherwise the writer is correct to leave the published release alone.
+  case ${mode} in
+    mismatched) MOCK_CHILD_STATE=foreign ;;
+    *) unset MOCK_CHILD_STATE ;;
+  esac
   rm -f -- "${state}" "${docker_log}"
-  if (publish_immutable_image_tag "${target}" "${source_ref}") >"${test_root}/stdout" 2>"${test_root}/stderr"; then
+  if (publish_immutable_image_tag "${target}" "${source_ref}" "${amd64_child}" "${arm64_child}") >"${test_root}/stdout" 2>"${test_root}/stderr"; then
     printf 'expected immutable publication failure for %s\n' "${mode}" >&2
     exit 1
   fi
   [[ ! -e ${docker_log} ]]
   if [[ ${mode} == mismatched ]]; then
-    grep -Fq 'immutable tag already points to a different digest' "${test_root}/stderr"
+    grep -Fq 'immutable tag already resolves to different images' "${test_root}/stderr"
   fi
 done
+
+# The name already resolves to this build's images under an index that cannot be reproduced. The
+# writer must leave it alone and report what is published, rather than die on an index digest that
+# differs by design: this is the case that made an unchanged contract impossible to republish.
+MOCK_TAG_STATE=mismatched
+MOCK_CHILD_STATE=ours
+export MOCK_CHILD_STATE
+rm -f -- "${state}" "${docker_log}"
+result=$(publish_immutable_image_tag "${target}" "${source_ref}" "${amd64_child}" "${arm64_child}")
+[[ ${result} == "registry.example:5000/rulego-server@${other}" ]] || {
+  echo 'a tag already holding this build images must be reported as published, not rewritten' >&2
+  exit 1
+}
+[[ ! -e ${docker_log} ]]
+
+# Same index shape, a different image underneath: still a refusal to displace what is published.
+MOCK_CHILD_STATE=foreign
+rm -f -- "${state}" "${docker_log}"
+if (publish_immutable_image_tag "${target}" "${source_ref}" "${amd64_child}" "${arm64_child}") 2>"${test_root}/stderr"; then
+  echo 'expected a refusal to displace different images under an immutable tag' >&2
+  exit 1
+fi
+[[ ! -e ${docker_log} ]]
+grep -Fq 'immutable tag already resolves to different images' "${test_root}/stderr"
+unset MOCK_CHILD_STATE
 
 MOCK_INDEX_STATE=complete
 export MOCK_INDEX_STATE
@@ -97,9 +159,11 @@ if verify_exact_image_children test@index "${expected}" "${other}" "${test_root}
 fi
 
 canonical_plan=${test_root}/canonical-plan.tsv
-printf '%s\t%s\t%s\n%s\t%s\t%s\n' \
+printf '%s\t%s\t%s\t%s\t%s\n%s\t%s\t%s\t%s\t%s\n' \
   registry.example:5000/rulego-plugin-sdk:abi-test "${source_ref}" plugin-sdk \
-  "${target}" "registry.example:5000/rulego-server@${expected}" runtime-plugin >"${canonical_plan}"
+  "${amd64_child}" "${arm64_child}" \
+  "${target}" "registry.example:5000/rulego-server@${expected}" runtime-plugin \
+  "${amd64_child}" "${arm64_child}" >"${canonical_plan}"
 
 # All canonical tags absent: the plan is publishable and nothing is written.
 MOCK_TAG_STATE=absent
@@ -138,6 +202,22 @@ fi
 [[ ! -e ${docker_log} ]]
 grep -Fq 'identity-conflict:' "${test_root}/stderr"
 unset MOCK_HELD_BY
+
+# The published index cannot be reproduced, so its digest differs, and yet it resolves to exactly
+# the two images this build produced. That is a rerun of an unchanged contract, and the only honest
+# answer is that nothing needs to be written. Before content was judged at artifact granularity this
+# line died as an identity conflict and recommended a release nobody controls.
+MOCK_TAG_STATE=mismatched
+MOCK_CHILD_STATE=ours
+export MOCK_CHILD_STATE MOCK_TAG_STATE
+rm -f -- "${state}" "${docker_log}"
+gate_out=$(require_immutable_tags_publishable "${canonical_plan}")
+[[ ! -e ${docker_log} ]]
+[[ ${gate_out} == $'plugin-sdk\tnoop\nruntime-plugin\tnoop' ]] || {
+  printf 'an unchanged contract under an unreproducible index must be a no-op, got: %s\n' "${gate_out}" >&2
+  exit 1
+}
+unset MOCK_CHILD_STATE
 
 # An unpublished canonical tag whose sibling holds this release's digest stays
 # publishable, so a rerun of the revision that first published it succeeds.
@@ -189,8 +269,7 @@ fi
 # from the identity the lock records, never from a digest guess.
 this_abi=abi-cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
 prev_abi=abi-dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
-want=sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee
-other=sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff
+held_index=sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff
 
 decision_case() {
   local description=$1 want_out=$2; shift 2
@@ -206,17 +285,30 @@ decision_case() {
   }
 }
 
-decision_case 'free name' publish absent '' "" "${want}" "${this_abi}" "${prev_abi}"
-decision_case 'already ours bit-for-bit' noop occupied "${this_abi}" "${want}" "${want}" "${this_abi}" "${prev_abi}"
-decision_case 'earlier contract owns it' superseded occupied "${prev_abi}" "${other}" "${want}" "${this_abi}" "${prev_abi}"
-decision_case 'same abi different bytes' identity-conflict occupied "${this_abi}" "${other}" "${want}" "${this_abi}" "${prev_abi}"
-decision_case 'holder the lock cannot name' collision occupied 'abi-99999999' "${other}" "${want}" "${this_abi}" "${prev_abi}"
-decision_case 'registry silent' unreachable unreachable '' "${other}" "${want}" "${this_abi}" "${prev_abi}"
+decision_case 'free name' publish absent '' no "${this_abi}" "${prev_abi}"
+decision_case 'this build images already published' noop occupied "${this_abi}" yes "${this_abi}" "${prev_abi}"
+decision_case 'earlier contract owns it' superseded occupied "${prev_abi}" no "${this_abi}" "${prev_abi}"
+decision_case 'same identity different images' identity-conflict occupied "${this_abi}" no "${this_abi}" "${prev_abi}"
+decision_case 'holder the lock cannot name' collision occupied 'abi-99999999' no "${this_abi}" "${prev_abi}"
+decision_case 'registry silent' unreachable unreachable '' no "${this_abi}" "${prev_abi}"
+# The published index cannot be reproduced: it carries one provenance and one SBOM member per
+# platform, and those describe the invocation that wrote them. So a rerun of an unchanged contract
+# always reaches this function with matching images under a digest that is not this build's index.
+# Content decides, and an accounted predecessor must not outrank that fact.
+decision_case 'index differs while images are ours' noop occupied "${prev_abi}" yes "${this_abi}" "${prev_abi}"
+# An answer that is neither yes nor no would degrade to "different" and start blocking releases the
+# gate has no evidence about, which is how a gate gets weakened until it means nothing.
+# Run in a subshell: the guard under test reports by exiting, and an `exit` reached from this shell
+# would end the whole suite instead of answering the question.
+if (canonical_tag_publish_decision occupied "${this_abi}" maybe "${this_abi}" "${prev_abi}") >/dev/null 2>&1; then
+  echo 'the content comparison must be answered yes or no' >&2
+  exit 1
+fi
 
 # A lock with no recorded predecessor has nothing to be superseded by: the older name is then an
 # unexplained holder, not a satisfied one. Falling through to collision here is the difference
 # between a contract fact and a guess.
-decision_case 'no predecessor recorded' collision occupied "${prev_abi}" "${other}" "${want}" "${this_abi}" ""
+decision_case 'no predecessor recorded' collision occupied "${prev_abi}" no "${this_abi}" ""
 
 # Two spent names, one slot. Measured on the live registry after the first real publication:
 # `v1.0.0-plugin` is held by the contract this lock replaced, and `v1.0.0-ai-plugin` is held by a
@@ -226,27 +318,28 @@ decision_case 'no predecessor recorded' collision occupied "${prev_abi}" "${othe
 # makes "this name is explained" a recorded fact rather than a choice of which name to explain.
 predecessor_set=$(printf '%s\n%s\n' "${prev_abi}" 'abi-99999999')
 decision_case 'first of two recorded predecessors' superseded occupied \
-  "${prev_abi}" "${other}" "${want}" "${this_abi}" "${predecessor_set}"
+  "${prev_abi}" no "${this_abi}" "${predecessor_set}"
 decision_case 'second of two recorded predecessors' superseded occupied \
-  'abi-99999999' "${other}" "${want}" "${this_abi}" "${predecessor_set}"
+  'abi-99999999' no "${this_abi}" "${predecessor_set}"
 decision_case 'a holder outside both' collision occupied \
-  'abi-88888888' "${other}" "${want}" "${this_abi}" "${predecessor_set}"
+  'abi-88888888' no "${this_abi}" "${predecessor_set}"
 # Exact membership, not prefix matching: a recorded predecessor must not vouch for a longer
 # identity that merely starts the same way.
 decision_case 'a longer identity sharing a predecessor prefix' collision occupied \
-  'abi-99999999aa' "${other}" "${want}" "${this_abi}" "${predecessor_set}"
-# Content equality still outranks provenance: our own digest on a name another accounted identity
-# once held remains a no-op, exactly as it does with a single predecessor.
-decision_case 'noop beats set membership' noop occupied \
-  'abi-99999999' "${want}" "${want}" "${this_abi}" "${predecessor_set}"
+  'abi-99999999aa' no "${this_abi}" "${predecessor_set}"
+# Content equality still outranks provenance: this build's images on a name another accounted
+# identity once held remain a no-op, exactly as they do with a single predecessor.
+decision_case 'noop beats set membership' noop occupied 'abi-99999999' yes "${this_abi}" "${predecessor_set}"
 
 # The gate's real job: a name owned by the contract this lock supersedes must not hold the rest of
 # the batch hostage. These two lines are one batch where the runtime tag belongs to the lock's
 # recorded predecessor and the SDK tag is this build's, so the old digest-only rule refused both.
 superseded_plan=${test_root}/superseded-plan.tsv
-printf '%s\t%s\t%s\n%s\t%s\t%s\n' \
+printf '%s\t%s\t%s\t%s\t%s\n%s\t%s\t%s\t%s\t%s\n' \
   registry.example:5000/rulego-plugin-sdk:abi-test "${source_ref}" plugin-sdk \
+  "${amd64_child}" "${arm64_child}" \
   registry.example:5000/rulego-server:v1.0.0-plugin "registry.example:5000/rulego-server@${expected}" runtime-plugin \
+  "${amd64_child}" "${arm64_child}" \
   >"${superseded_plan}"
 
 # Registry stand-in: the SDK name is free, the runtime name resolves to bytes that are not this

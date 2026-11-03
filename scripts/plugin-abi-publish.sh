@@ -164,10 +164,24 @@ PLUGIN_ABI_SIZE_REPORT=${TMPDIR}/staging-sizes.tsv \
 # cannot leave a partially published release behind.
 canonical_plan=${TMPDIR}/canonical-tags.tsv
 : >"${canonical_plan}"
-printf '%s\t%s\t%s\n' "${sdk_canonical}" "${sdk_staging_index}" plugin-sdk >>"${canonical_plan}"
+
+# The child digests are taken from the native build evidence rather than from the staging indexes
+# about to be published, because the evidence is what the per-architecture runners produced and
+# what `verify_index_children` already holds those indexes against. A plan built from the new index
+# digest could only ever ask the registry to compare two things that differ by design.
+plan_children() {
+  local selector=$1
+  printf '%s\t%s\n' \
+    "$(jq -er "${selector}.child_digest" "${evidence_dir}/plugin-abi-amd64.json")" \
+    "$(jq -er "${selector}.child_digest" "${evidence_dir}/plugin-abi-arm64.json")"
+}
+
+printf '%s\t%s\t%s\t%s\n' "${sdk_canonical}" "${sdk_staging_index}" plugin-sdk \
+  "$(plan_children '.sdk')" >>"${canonical_plan}"
 while IFS=$'\t' read -r host_id runtime_index; do
   runtime_name=$(jq -er --arg host_id "${host_id}" '.runtime[$host_id]' <<<"${tags}")
-  printf '%s\t%s\t%s\n' "${runtime_repository}:${runtime_name#*:}" "${runtime_index}" "runtime-${host_id}" >>"${canonical_plan}"
+  printf '%s\t%s\t%s\t%s\n' "${runtime_repository}:${runtime_name#*:}" "${runtime_index}" \
+    "runtime-${host_id}" "$(plan_children ".runtime[\"${host_id}\"]")" >>"${canonical_plan}"
 done < <(jq -r 'to_entries[] | [.key, .value] | @tsv' <<<"${runtime_staging_indexes}")
 # The gate classifies every canonical name before the first write. Only a `superseded` runtime
 # host is left alone: an earlier contract holds that name, and its digest still answers to it.
@@ -180,7 +194,9 @@ superseded_hosts=$(canonical_superseded_hosts "${gate_decisions}")
 canonical_sdk_superseded "${gate_decisions}" ||
   die 'the SDK canonical tag reads as superseded; a release without its SDK is not publishable'
 
-sdk_ref=$(publish_immutable_image_tag "${sdk_canonical}" "${sdk_staging_index}")
+IFS=$'\t' read -r sdk_amd64_child sdk_arm64_child <<<"$(plan_children '.sdk')"
+sdk_ref=$(publish_immutable_image_tag "${sdk_canonical}" "${sdk_staging_index}" \
+  "${sdk_amd64_child}" "${sdk_arm64_child}")
 runtime_refs='{}'
 while IFS= read -r host_id; do
   if jq -e --arg host "${host_id}" 'index($host) != null' <<<"${superseded_hosts}" >/dev/null; then
@@ -190,7 +206,9 @@ while IFS= read -r host_id; do
   runtime_name=$(jq -er --arg host_id "${host_id}" '.runtime[$host_id]' <<<"${tags}")
   runtime_canonical=${runtime_repository}:${runtime_name#*:}
   runtime_index=$(jq -er --arg host_id "${host_id}" '.[$host_id]' <<<"${runtime_staging_indexes}")
-  runtime_ref=$(publish_immutable_image_tag "${runtime_canonical}" "${runtime_index}")
+  IFS=$'\t' read -r host_amd64_child host_arm64_child <<<"$(plan_children ".runtime[\"${host_id}\"]")"
+  runtime_ref=$(publish_immutable_image_tag "${runtime_canonical}" "${runtime_index}" \
+    "${host_amd64_child}" "${host_arm64_child}")
   runtime_refs=$(jq -c --arg host_id "${host_id}" --arg ref "${runtime_ref}" \
     '.[$host_id] = $ref' <<<"${runtime_refs}")
 done < <(jq -r '.hosts[].id' <<<"${ci_json}")
