@@ -116,16 +116,16 @@ RUNTIME_HOST=${RUNTIME_HOST:-plugin}
 RUNTIME_REF=$(jq -er --arg host "$RUNTIME_HOST" \
   '.runtime[$host] | select(test("@sha256:[0-9a-f]{64}$"))' plugin-abi-release.json)
 ABI_ID=$(jq -er '.abi_id' plugin-abi-release.json)
-LOCK_DIGEST=$(jq -er '.lock_digest' plugin-abi-release.json)
+ABI_MANIFEST_DIGEST=$(jq -er '.abi_manifest_digest' plugin-abi-release.json)
 
 install -d -m 0777 dist
 docker run --rm --platform linux/amd64 \
   -v "$PWD:/workspace:ro" -v "$PWD/dist:/output" \
   "$SDK_REF" ./plugin /output/plugin.so
 PLUGIN_SHA256=$(sha256sum dist/plugin.so | awk '{print $1}')
-jq -e --arg abi "$ABI_ID" --arg lock "$LOCK_DIGEST" --arg sha "$PLUGIN_SHA256" \
+jq -e --arg abi "$ABI_ID" --arg manifest "$ABI_MANIFEST_DIGEST" --arg sha "$PLUGIN_SHA256" \
   '.abi_id == $abi and .platform == "linux/amd64" and
-   .lock_digest == $lock and .plugin_sha256 == $sha' dist/plugin.so.abi.json
+   .abi_manifest_digest == $manifest and .plugin_sha256 == $sha' dist/plugin.so.abi.json
 ```
 
 Install only a sidecar-verified plugin in the runtime's persisted data path:
@@ -138,7 +138,8 @@ docker run --rm --platform linux/amd64 -p 9090:9090 \
   "$RUNTIME_REF"
 ```
 
-The complete canonical lock is available in both images at
+The canonical identity document — `abi_id` plus the `.abi` closure it hashes —
+is available in both images at
 `/usr/share/rulego/plugin-abi.json`. OCI index annotations expose the ordered
 platform set and common ABI fields; each child config labels only its own
 platform. Plugin repositories may add plugin-only modules, but must explicitly
@@ -146,6 +147,12 @@ align shared dependencies with the manifest; the SDK rejects mismatched host
 module identities and never edits the plugin checkout. Plugins are installed
 externally under `/app/data/plugins`; no business plugin is bundled in the
 runtime image.
+What the images do *not* carry is the digest of the whole lock file. Release
+policy — `state`, the size ceilings, the runner labels — lives in that file, and
+hashing it into an image would let a policy edit move a published artifact whose
+identity had not changed. The lock digest stays in the release record and in the
+per-architecture evidence, outside the bytes; the digest an image can be checked
+against is `abi_manifest_digest`, which covers the identity document only.
 The digest-pinned SDK compiles the host and exports a root filesystem. The
 runtime recipe copies only that root filesystem into the pinned distroless
 base, so SDK layers and build tools never enter the runtime image.

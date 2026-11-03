@@ -29,7 +29,7 @@ RUN set -eu; \
     linker_output=$("${LINKER_COMMAND}" --version 2>&1); \
     printf '%s\n' "${linker_output}" | grep -F "${LINKER_IDENTITY}"; \
     printf '%s\n' "${linker_output}" | grep -F "${LINKER_VERSION}"; \
-    test "sha256:$(sha256sum /abi-manifest.json | awk '{print $1}')" = "${LOCK_DIGEST}"; \
+    test "sha256:$(sha256sum /abi-manifest.json | awk '{print $1}')" = "${ABI_MANIFEST_DIGEST}"; \
     cmp /abi-manifest.json "${ABI_MANIFEST_PATH}"; \
     rm -rf "${home}"
 

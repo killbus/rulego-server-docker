@@ -12,7 +12,7 @@ lock=${PLUGIN_ABI_LOCK:-${repository_root}/plugin-abi.lock}
 usage() {
   cat >&2 <<'EOF'
 usage: scripts/plugin-abi.sh validate <--candidate|--release>
-       scripts/plugin-abi.sh render <id|lock-digest|manifest|matrix|ci|editor>
+       scripts/plugin-abi.sh render <id|lock-digest|manifest|manifest-digest|matrix|ci|editor>
        scripts/plugin-abi.sh render build <amd64|arm64>
        scripts/plugin-abi.sh render sdk-env <amd64|arm64> [host-id]
        scripts/plugin-abi.sh render compatibility-sdk <amd64|arm64>
@@ -33,11 +33,27 @@ calculated_abi_id() {
   printf 'abi-%s\n' "$(canonical_abi | sha256sum | awk '{print $1}')"
 }
 
-canonical_manifest() {
+# The bytes the lock file is, whole. This is provenance about a file in a repository, and it goes in
+# the evidence, the release record and the probe record. It does not go in image bytes: a hash of the
+# whole lock is a hash of the release policy too, so baking it would let `state`, a ceiling or a
+# runner label move a published artifact while its identity stayed exactly where it was.
+canonical_lock() {
   jq -S -c . "${lock}" | tr -d '\r'
 }
 
 lock_digest() {
+  canonical_lock | sha256sum | awk '{print "sha256:" $1}'
+}
+
+# The bytes the identity is. `abi_id` is the digest of `.abi`, so a reader holding this document can
+# check the name the image carries against the content it claims, without the lock's release policy
+# being part of what is checked. The two paths the file is staged at, and every verifier that
+# compares it, read these bytes; nothing outside `.abi` reaches an image through them.
+canonical_manifest() {
+  jq -S -c '{abi_id, abi}' "${lock}" | tr -d '\r'
+}
+
+abi_manifest_digest() {
   canonical_manifest | sha256sum | awk '{print "sha256:" $1}'
 }
 
@@ -215,11 +231,16 @@ render_editor() {
 
 render_build() {
   local arch=${1:?build architecture is required}
-  jq -ec --arg arch "${arch}" --arg lock_digest "$(lock_digest)" '
+  jq -ec --arg arch "${arch}" --arg lock_digest "$(lock_digest)" \
+    --arg abi_manifest_digest "$(abi_manifest_digest)" '
     (.abi.go.targets[] | select(.goarch == $arch)) as $target |
     (.abi.native.toolchains[] | select(.goarch == $arch)) as $toolchain |
     {
       abi_id, lock_digest: $lock_digest,
+      # What the image is allowed to know about its own lock: the identity document and its digest.
+      # `lock_digest` stays here for the evidence file, which is written outside the image, and is
+      # deliberately not exported into `render sdk-env`, because that file is copied into the image.
+      abi_manifest_digest: $abi_manifest_digest,
       manifest_path: .release.manifest_path,
       reproducible_epoch: .release.reproducible_epoch,
       go: (.abi.go | del(.targets)), target: $target,
@@ -242,7 +263,11 @@ render_sdk_env() {
   done < <(jq -r '
     [
       ["ABI_ID", .abi_id],
-      ["LOCK_DIGEST", .lock_digest],
+      # The digest of what the image actually carries. The whole-lock digest is not exported here:
+      # this file is copied into the SDK, so a value that covers `state`, the ceilings and the runner
+      # labels would put release policy inside published bytes and let a policy edit move an artifact
+      # whose identity did not change.
+      ["ABI_MANIFEST_DIGEST", .abi_manifest_digest],
       ["GO_VERSION", .go.version],
       ["GOOS", .go.goos],
       ["GOARCH", .target.goarch],
@@ -315,11 +340,15 @@ render_metadata() {
     jq -e --arg host_id "${host_id}" '.abi.build.hosts | any(.id == $host_id)' "${lock}" >/dev/null \
       || die "unknown host variant: ${host_id}"
   fi
-  jq -c --arg lock_digest "$(lock_digest)" --arg variant "${variant}" --arg arch "${arch}" --arg host_id "${host_id}" '
+  jq -c --arg manifest_digest "$(abi_manifest_digest)" --arg variant "${variant}" --arg arch "${arch}" --arg host_id "${host_id}" '
     (.abi.build.hosts[] | select(.id == $host_id)) as $host |
     {
       "io.rulego.abi.id": .abi_id,
-      "io.rulego.abi.lock.digest": $lock_digest,
+      # The digest of the identity document the image carries, not of the lock file it was rendered
+      # from. A label is part of the child config, so a whole-lock digest here would put release
+      # policy -- `state`, the ceilings, the runner labels -- inside published bytes, and a policy
+      # edit would then move an artifact whose identity had not changed.
+      "io.rulego.abi.manifest.digest": $manifest_digest,
       "io.rulego.image.variant": $variant,
       "io.rulego.server.release": .abi.rulego_server.release_version,
       "io.rulego.server.revision": .abi.rulego_server.revision,
@@ -397,6 +426,7 @@ case ${1:-} in
       id) [[ $# == 2 ]] || usage; validate_lock --candidate; jq -er '.abi_id' "${lock}" ;;
       lock-digest) [[ $# == 2 ]] || usage; validate_lock --candidate; lock_digest ;;
       manifest) [[ $# == 2 ]] || usage; validate_lock --candidate; canonical_manifest ;;
+      manifest-digest) [[ $# == 2 ]] || usage; validate_lock --candidate; abi_manifest_digest ;;
       matrix) [[ $# == 2 ]] || usage; validate_lock --candidate; render_matrix ;;
       ci) [[ $# == 2 ]] || usage; validate_lock --candidate; render_ci ;;
       editor) [[ $# == 2 ]] || usage; validate_lock --candidate; render_editor ;;

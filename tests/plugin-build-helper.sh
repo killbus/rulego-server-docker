@@ -20,7 +20,7 @@ sum_digest=$(sha256sum "${test_root}/host/go.sum" | awk '{print $1}')
 
 cat >"${test_root}/build.env" <<EOF
 ABI_ID=abi-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
-LOCK_DIGEST=${manifest_digest}
+ABI_MANIFEST_DIGEST=${manifest_digest}
 GO_VERSION=1.25.0
 GOOS=linux
 GOARCH=amd64
@@ -162,6 +162,16 @@ run_helper() {
 run_helper
 [[ -f ${test_root}/output/plugin.so.sha256 && -f ${test_root}/output/plugin.so.abi.json ]]
 grep -Fq '"platform": "linux/amd64"' "${test_root}/output/plugin.so.abi.json"
+# The sidecar is the contract a plugin repository reads, and the field it names has to be the digest
+# of the document the SDK actually carried. A sidecar that reported the whole-lock digest again would
+# make a release-policy edit look like a build fact, so both halves are pinned here: the field the
+# recipe promises, and the field the recipe must never grow.
+jq -e --arg digest "${manifest_digest}" '
+  .abi_manifest_digest == $digest and (.lock_digest | not) and
+  (.abi_id | test("^abi-[0-9a-f]{64}$"))' "${test_root}/output/plugin.so.abi.json" >/dev/null || {
+  printf 'the sidecar no longer reports the identity-document digest it was built against\n' >&2
+  exit 1
+}
 grep -Fq 'list -deps' "${test_root}/dependency-list-invocation"
 [[ $(<"${test_root}/dependency-list-invocation") == *' .' ]]
 grep -Fq -- '-buildvcs=false' "${test_root}/dependency-list-invocation"

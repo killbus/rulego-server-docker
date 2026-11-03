@@ -24,7 +24,8 @@ done
 # shellcheck disable=SC1090
 source "${build_environment}"
 
-[[ "sha256:$(sha256sum "${manifest}" | awk '{print $1}')" == "${LOCK_DIGEST}" ]] || die 'SDK ABI manifest digest mismatch'
+[[ "sha256:$(sha256sum "${manifest}" | awk '{print $1}')" == "${ABI_MANIFEST_DIGEST}" ]] ||
+  die 'SDK ABI manifest digest mismatch'
 [[ $(sha256sum "${host_source}/go.mod" | awk '{print $1}') == "${SERVER_GO_MOD_SHA256}" ]] || die 'SDK RuleGo go.mod digest mismatch'
 [[ $(sha256sum "${host_source}/go.sum" | awk '{print $1}') == "${SERVER_GO_SUM_SHA256}" ]] || die 'SDK RuleGo go.sum digest mismatch'
 [[ $(GOENV="${GOENV}" GOTOOLCHAIN="${GOTOOLCHAIN}" go env GOVERSION) == "go${GO_VERSION}" ]] || die 'SDK Go version does not match the ABI manifest'
@@ -128,5 +129,10 @@ grep -Fq $'dep\t'"${CORE_MODULE}"$'\t'"${CORE_VERSION}" "${build_info}" || die '
 
 digest=$(sha256sum "${output}" | awk '{print $1}')
 printf '%s  %s\n' "${digest}" "$(basename -- "${output}")" >"${output}.sha256"
-printf '{\n  "abi_id": "%s",\n  "platform": "%s/%s",\n  "lock_digest": "%s",\n  "plugin_sha256": "%s"\n}\n' \
-  "${ABI_ID}" "${GOOS}" "${GOARCH}" "${LOCK_DIGEST}" "${digest}" >"${output}.abi.json"
+# The sidecar names the identity this plugin was compiled against, and the digest of the identity
+# document the SDK read to decide that. It does not name the lock file: the SDK does not carry one,
+# and a plugin built under a different release policy but the same ABI is the same plugin. A consumer
+# that needs the lock compares `abi_manifest_digest` against the release record it downloaded, which
+# carries both that digest and the lock digest outside the image.
+printf '{\n  "abi_id": "%s",\n  "platform": "%s/%s",\n  "abi_manifest_digest": "%s",\n  "plugin_sha256": "%s"\n}\n' \
+  "${ABI_ID}" "${GOOS}" "${GOARCH}" "${ABI_MANIFEST_DIGEST}" "${digest}" >"${output}.abi.json"

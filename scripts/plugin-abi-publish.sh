@@ -19,6 +19,7 @@ mkdir -p "${repository_root}/tmp"
 export TMPDIR=${repository_root}/tmp
 abi_id=$("${script_dir}/plugin-abi.sh" render id)
 lock_digest=$("${script_dir}/plugin-abi.sh" render lock-digest)
+abi_manifest_digest=$("${script_dir}/plugin-abi.sh" render manifest-digest)
 packaging_revision=${GITHUB_SHA:?GITHUB_SHA is required}
 [[ ${packaging_revision} =~ ^[0-9a-f]{40}$ ]] || die 'GITHUB_SHA must be a full lowercase commit revision'
 # `packaging_revision` qualifies staging tag names and the release record only. It is deliberately
@@ -48,9 +49,11 @@ verify_evidence() {
   local arch=$1 file=$2 host_id tag_suffix staging index child expected_staging inspected
   [[ -f ${file} ]] || die "missing native evidence: ${file}"
   jq -e --arg arch "${arch}" --arg abi "${abi_id}" --arg lock "${lock_digest}" \
+    --arg manifest "${abi_manifest_digest}" \
     --arg revision "${packaging_revision}" --argjson hosts "$(jq -c '[.hosts[].id] | sort' <<<"${ci_json}")" '
     .architecture == $arch and .platform == ("linux/" + $arch) and
-    .abi_id == $abi and .lock_digest == $lock and .packaging_revision == $revision and
+    .abi_id == $abi and .lock_digest == $lock and
+    .abi_manifest_digest == $manifest and .packaging_revision == $revision and
     (.runtime | keys | sort) == $hosts and
     ([.sdk, .runtime[]] | all(
       (.staging_reference | type == "string" and length > 0) and
@@ -240,10 +243,12 @@ PLUGIN_ABI_SIZE_REPORT=${TMPDIR}/published-sizes.tsv \
 runtime_aliases=$(jq -c --arg repository "${runtime_repository}" '
   .runtime | map_values($repository + ":" + (.alias | split(":")[1]))' <<<"${tags}")
 jq -S -n --arg abi_id "${abi_id}" --arg lock_digest "${lock_digest}" \
+  --arg abi_manifest_digest "${abi_manifest_digest}" \
   --arg packaging_revision "${packaging_revision}" --arg sdk "${sdk_ref}" --argjson runtime "${runtime_refs}" \
   --argjson runtime_aliases "${runtime_aliases}" \
   --argjson superseded "${superseded_hosts}" \
-  '{abi_id:$abi_id,lock_digest:$lock_digest,packaging_revision:$packaging_revision,sdk:$sdk,
+  '{abi_id:$abi_id,lock_digest:$lock_digest,abi_manifest_digest:$abi_manifest_digest,
+    packaging_revision:$packaging_revision,sdk:$sdk,
     runtime:$runtime,runtime_aliases:$runtime_aliases,superseded_hosts:$superseded}' \
   >"${TMPDIR}/plugin-abi-release.json"
 log "published immutable Plugin ABI indexes; record: tmp/plugin-abi-release.json"
