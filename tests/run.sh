@@ -19,6 +19,7 @@ for test_script in \
   "${script_dir}/plugin-image-contract.sh" \
   "${script_dir}/plugin-publication-policy.sh" \
   "${script_dir}/canonical-tag-allocatability.sh" \
+  "${script_dir}/plugin-abi-runtime-naming.sh" \
   "${script_dir}/derive-compatibility-sdk.sh" \
   "${script_dir}/prepare-plugin-abi.sh" \
   "${script_dir}/resolve-release.sh" \

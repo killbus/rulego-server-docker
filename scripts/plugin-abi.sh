@@ -354,11 +354,36 @@ render_tags() {
   # still measuring. The candidate mode exists for the allocatability dry-run, which has to
   # ask the same question about names while `release.state` is measurement, that is before
   # any of this is publishable at all.
+  #
+  # Two tracks, because one name cannot be both a promise and an address:
+  #   canonical -- `v1.0.0-<host>-<rev>`, won by one build and never moved. The revision is the
+  #                packaging commit, so a rebuild of the same commit re-wins the same name and
+  #                compares equal to its own content, while any new commit arrives under a name
+  #                nobody has spent. Adding a host variant, re-signing the lock or advancing the
+  #                recipe therefore never has to wait for `release_version` to move upstream.
+  #   alias     -- `v1.0.0-<host>`, the human-level name. It moves, and only through
+  #                scripts/promote-alias.sh, which re-checks the canonical digest it was verified
+  #                at and records where the alias pointed beforehand. Inside one `release_version`
+  #                it always means "the newest verified build of this release line", and it never
+  #                crosses an ABI break, because an ABI break is a new `release_version`.
   validate_lock "${1:---release}"
-  jq -c '. as $root | {
+  local name_revision=${PLUGIN_ABI_NAME_REVISION:-}
+  # `none` is the one legal value that is not a commit, and it means something specific: no build has
+  # happened, so no per-build canonical name exists yet. The allocatability probe uses it to ask about
+  # the names the lock already determines and to report the aliases as they stand, without inventing a
+  # name a build could never own. A caller about to write must never use it, which is why publication
+  # re-checks the shape and counts its plan against the lock rather than against this render.
+  [[ ${name_revision} =~ ^[0-9a-f]{40}$ || ${name_revision} == none ]] ||
+    die 'render tags needs PLUGIN_ABI_NAME_REVISION: the 40-character packaging commit whose build wins the canonical names, or none before any build exists'
+  jq -c --arg rev "${name_revision:0:12}" '. as $root | {
     sdk: (.release.sdk_image + ":" + .abi_id),
     runtime: (reduce .abi.build.hosts[] as $host ({};
-      .[$host.id] = ($root.release.runtime_image + ":" + $root.abi.rulego_server.release_version + $host.tag_suffix)))
+      .[$host.id] = {
+        canonical: (if $rev == "none" then null
+                    else $root.release.runtime_image + ":" + $root.abi.rulego_server.release_version + $host.tag_suffix + "-" + $rev
+                    end),
+        alias: ($root.release.runtime_image + ":" + $root.abi.rulego_server.release_version + $host.tag_suffix)
+      }))
   }' "${lock}"
 }
 

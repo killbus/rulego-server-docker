@@ -130,8 +130,13 @@ jq '.release.state = "measurement" |
   (.release.size_limits[] | .sdk.compressed, .sdk.uncompressed,
     .runtime[].compressed, .runtime[].uncompressed) = null' plugin-abi.lock >"${measurement}"
 PLUGIN_ABI_LOCK=${measurement} scripts/plugin-abi.sh validate --candidate
+# A fixed 40-character value: the canonical runtime name is per build, so rendering tags at all needs
+# one, and a test that left it out would fail for the missing name rather than for the reason it is
+# checking. `none` is what a pre-build probe passes and is not a build identity, so it is not used here.
+name_revision=$(printf '1%.0s' {1..40})
 expect_failure 'measurement lock cannot render public tags' \
-  env PLUGIN_ABI_LOCK="${measurement}" scripts/plugin-abi.sh render tags
+  env PLUGIN_ABI_LOCK="${measurement}" PLUGIN_ABI_NAME_REVISION="${name_revision}" \
+  scripts/plugin-abi.sh render tags
 
 ready=${test_root}/ready.json
 jq '.release.state = "ready" |
@@ -139,14 +144,32 @@ jq '.release.state = "ready" |
     .runtime[].compressed, .runtime[].uncompressed) = 1' plugin-abi.lock >"${ready}"
 [[ $(jq -r '.abi_id' "${ready}") == "${abi_id}" ]]
 PLUGIN_ABI_LOCK=${ready} scripts/plugin-abi.sh validate --release
-tags=$(PLUGIN_ABI_LOCK=${ready} scripts/plugin-abi.sh render tags)
+tags=$(PLUGIN_ABI_LOCK=${ready} PLUGIN_ABI_NAME_REVISION=${name_revision} scripts/plugin-abi.sh render tags)
 jq -e --arg abi_id "${abi_id}" '
   .sdk == ("rulego-plugin-sdk:" + $abi_id) and
   .runtime == {
-    "plugin":"rulego-server:v1.0.0-plugin",
-    "ai-plugin":"rulego-server:v1.0.0-ai-plugin"
+    "plugin":    {canonical:"rulego-server:v1.0.0-plugin-111111111111",
+                  alias:"rulego-server:v1.0.0-plugin"},
+    "ai-plugin": {canonical:"rulego-server:v1.0.0-ai-plugin-111111111111",
+                  alias:"rulego-server:v1.0.0-ai-plugin"}
   }
 ' <<<"${tags}" >/dev/null
+
+# The SDK name is the identity and carries no build suffix: an SDK is a compile input, so a name that
+# moved between builds would leave a plugin built against it pointing at something else.
+tags_none=$(PLUGIN_ABI_LOCK=${ready} PLUGIN_ABI_NAME_REVISION=none scripts/plugin-abi.sh render tags --candidate)
+jq -e --arg abi_id "${abi_id}" '
+  .sdk == ("rulego-plugin-sdk:" + $abi_id) and
+  (.runtime | to_entries | all(.value.canonical == null)) and
+  (.runtime | to_entries | all(.value.alias != null))
+' <<<"${tags_none}" >/dev/null
+
+# A revision that is not a full commit is refused rather than abbreviated: `deadbeef` as a prefix is
+# also somebody's branch name, and a canonical name minted from a guess could be won twice.
+expect_failure 'render tags refuses a partial packaging revision' \
+  env PLUGIN_ABI_LOCK="${ready}" PLUGIN_ABI_NAME_REVISION=deadbeef scripts/plugin-abi.sh render tags
+expect_failure 'render tags refuses an absent packaging revision' \
+  env PLUGIN_ABI_LOCK="${ready}" scripts/plugin-abi.sh render tags
 
 expect_failure 'unknown host cannot render SDK environment' \
   scripts/plugin-abi.sh render sdk-env amd64 missing-host

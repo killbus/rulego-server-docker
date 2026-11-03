@@ -506,9 +506,27 @@ canonical_tag_plan() {
 
   jq -r --arg owner "${owner}" '
     [ {identity: "plugin-sdk", target: ("ghcr.io/" + $owner + "/" + .sdk)} ] +
-    [ .runtime | to_entries[] |
-        {identity: ("runtime-" + .key), target: ("ghcr.io/" + $owner + "/" + .value)} ] |
+    # The plan carries canonical names only. An alias is a moving name and must never appear here,
+    # because everything downstream treats a plan line as a first-writer promise. A null canonical is
+    # the pre-build state: no build has decided that name yet, so there is nothing to promise and no
+    # line to write. Publication counts the lines it gets against the lock, so a null there is refused
+    # rather than read as a smaller batch.
+    [ .runtime | to_entries[] | select(.value.canonical != null) |
+        {identity: ("runtime-" + .key), target: ("ghcr.io/" + $owner + "/" + .value.canonical)} ] |
     .[] | [.identity, .target] | @tsv' <<<"${tags}"
+}
+
+# A plan is a promise about every artifact this release owns, so its size is checked against the lock
+# rather than against the render that produced it. A canonical runtime name that came out null -- the
+# pre-build state, which only the probe may ask for -- would otherwise look like a smaller batch, and
+# the gate would approve a plan that no longer contains the hosts it exists to protect.
+require_canonical_plan_lines() {
+  local plan_file=${1:?canonical plan file is required}
+  local host_count=${2:?host count is required}
+  local lines
+  lines=$(wc -l <"${plan_file}" | tr -d ' ')
+  [[ ${lines} == $((1 + host_count)) ]] ||
+    die "canonical plan has ${lines} lines for ${host_count} hosts plus the SDK; a canonical name is missing from the plan"
 }
 
 # Classifies one canonical tag probe into a verdict, given the identity this lock claims and the

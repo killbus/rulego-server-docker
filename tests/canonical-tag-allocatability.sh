@@ -212,6 +212,11 @@ PAIRS
 # canonical targets inline from the same rendered tags, the same owner and the same repository
 # derivation; this asserts the derivation in `canonical_tag_plan` reproduces those exact strings,
 # so neither side can drift into reporting on a name the other never touches.
+# Publication renders its targets from the commit that produced the build, so this comparison has to
+# render them from one too. The value is arbitrary here; what is being asserted is that the probe's
+# derivation and publication's derivation produce the same strings from the same inputs.
+name_revision=$(printf '2%.0s' {1..40})
+export PLUGIN_ABI_NAME_REVISION="${name_revision}"
 tags=$("${repository_root}/scripts/plugin-abi.sh" render tags --candidate)
 owner=killbus
 sdk_name=$(jq -er '.sdk' <<<"${tags}")
@@ -222,7 +227,7 @@ runtime_repository=ghcr.io/${owner}/$(
   printf 'plugin-sdk\t%s:%s\n' "${sdk_repository}" "${sdk_name#*:}"
   while IFS=$'\t' read -r host_id runtime_name; do
     printf 'runtime-%s\t%s:%s\n' "${host_id}" "${runtime_repository}" "${runtime_name#*:}"
-  done < <(jq -r '.runtime | to_entries[] | [.key, .value] | @tsv' <<<"${tags}")
+  done < <(jq -r '.runtime | to_entries[] | [.key, .value.canonical] | @tsv' <<<"${tags}")
 } >"${test_root}/publication.tsv"
 canonical_tag_plan "${tags}" "${owner}" >"${test_root}/probe.tsv"
 cmp -s "${test_root}/publication.tsv" "${test_root}/probe.tsv" ||
@@ -245,6 +250,27 @@ grep -Fq 'tags=$("${script_dir}/plugin-abi.sh" render tags)' "${publish}" ||
 grep -Fq 'owner=${GITHUB_REPOSITORY_OWNER:?GITHUB_REPOSITORY_OWNER is required}' "${publish}" ||
   die 'publication no longer takes the registry owner from the repository context, which is the
       only reason the probe is allowed to derive namespaces the same way'
+
+# An alias is a moving name, so it must never reach the canonical plan: every consumer of a plan line
+# treats it as a first-writer promise, and a promise on a name that is meant to move would block the
+# next verified build from being promoted at all.
+while IFS=$'\t' read -r _identity target; do
+  while IFS=$'\t' read -r _host alias; do
+    [[ ${target} != "ghcr.io/${owner}/${alias#*:}" ]] ||
+      die "the canonical plan carries the moving alias ${target} as a first-writer promise"
+  done < <(jq -r '.runtime | to_entries[] | [.key, .value.alias] | @tsv' <<<"${tags}")
+done <"${test_root}/probe.tsv"
+# Both tracks must still be present in the render, or the check above is comparing an empty set.
+jq -e '.runtime | to_entries | (all(.value.canonical != null)) and (all(.value.alias != null))' \
+  <<<"${tags}" >/dev/null || die 'the rendered tags lost one of the two name tracks'
+
+# Publication may not render names in the pre-build mode: `none` makes every canonical runtime name
+# null, and a plan with the hosts missing would approve a batch that no longer contains them.
+grep -Fq 'export PLUGIN_ABI_NAME_REVISION=${packaging_revision}' "${publish}" ||
+  die 'publication no longer names canonical runtime tags from the commit that built them'
+grep -Fq 'require_canonical_plan_lines "${canonical_plan}"' "${publish}" ||
+  die 'publication no longer counts the canonical plan against the lock, so a canonical runtime name
+      that became null would silently shrink the batch instead of refusing the release'
 
 # A verdict is never taken without both identities it compares against, so a caller that loses one
 # cannot default its way to allocatable.

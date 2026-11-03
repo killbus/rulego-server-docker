@@ -76,6 +76,16 @@ lock_digest=$("${script_dir}/plugin-abi.sh" render lock-digest)
 # apart from an empty set. An empty set is a legal state; an unreadable one is not.
 validate_publish_history "${lock}"
 predecessors=$(canonical_predecessor_abi_ids "${lock}")
+# The canonical runtime name is won by a build, so the probe renders it from the revision this run
+# stands for: a pull-request run asks about the name that pull request's commit would win, and a run
+# with no commit at all (`not-in-ci`, which is a local run) asks only about the names the lock already
+# determines by itself. That is a narrower question, so the narrower answer is reported below rather
+# than passed off as the whole batch having been checked.
+if [[ ${revision} == not-in-ci ]]; then
+  export PLUGIN_ABI_NAME_REVISION=none
+else
+  export PLUGIN_ABI_NAME_REVISION=${revision}
+fi
 tags=$("${script_dir}/plugin-abi.sh" render tags --candidate)
 
 # The owner comes from the repository context because that is where publication takes it. A probe
@@ -93,6 +103,14 @@ collisions=0
 unreachable=0
 superseded=0
 republish=0
+# Stated up front, because the answer is narrower than the batch when no build identity exists: the
+# SDK name is decided by the lock and is always asked about, while a canonical runtime name is decided
+# by a build and cannot be named before one. Silently probing one name and reporting a pass would make
+# a local run look like evidence about names nothing has chosen yet.
+if [[ ${PLUGIN_ABI_NAME_REVISION} == none ]]; then
+  log 'no build identity is available, so the per-build canonical runtime names are not probed; the'
+  log 'SDK canonical name and the aliases are reported below'
+fi
 while IFS=$'\t' read -r identity target; do
   [[ -n ${identity} && -n ${target} ]] || die "invalid canonical target plan line for ${identity}"
   probe_status=''
@@ -128,11 +146,12 @@ if [[ -n ${record} ]]; then
   # only when neither source exists, and is rejected as a value rather than guessed at.
   jq -cn --arg abi_id "${abi_id}" --arg lock_digest "${lock_digest}" \
     --arg previous_abi_id "$(jq -er '.compatibility.previous_sdk.abi_id' "${lock}")" \
-    --arg revision "${revision}" --argjson results "${results}" \
+    --arg revision "${revision}" --arg name_revision "${PLUGIN_ABI_NAME_REVISION}" \
+    --argjson results "${results}" \
     --argjson predecessors "$(printf '%s\n' "${predecessors}" | jq -Rsc 'split("\n") | map(select(length > 0))')" \
     '{abi_id:$abi_id,lock_digest:$lock_digest,previous_abi_id:$previous_abi_id,
       predecessor_abi_ids:$predecessors,
-      probe_revision:$revision,targets:$results}' >"${record}"
+      probe_revision:$revision,name_revision:$name_revision,targets:$results}' >"${record}"
 fi
 
 # Counted separately because the two send the reader to different places: an unaccounted holder is
