@@ -20,11 +20,21 @@
 # `v1.0.0-plugin` no later lock can, and a gate that reddened on that would be permanently red on
 # main -- the exact condition under which checks get weakened until they mean nothing. The
 # blocker is instead named, in a machine-readable record, so the operator sees which host is
-# blocked and which are not. The distinction needs no hand-kept list: the lock already records the
-# predecessor's identity in `compatibility.previous_sdk.abi_id`, and publication already writes
-# `io.rulego.abi.id` into every canonical index, so the comparison is data and it rotates itself at
-# every re-sign. Anything held by an identity the lock does not account for is unexplained and
-# fails; a registry that cannot answer is never counted as free.
+# blocked and which are not. The comparison is data, not recall: publication writes
+# `io.rulego.abi.id` into every canonical index, and the identity it names is read from the lock
+# rather than retyped.
+#
+# One recorded predecessor is not always enough. Measured after the first real publication, two
+# runtime names were spent by two different identities -- the contract this lock replaced, and an
+# earlier cast made under an identity function this lock no longer evaluates -- and a single slot
+# can vouch for only one of them, which leaves the other reading as a collision and refuses a batch
+# whose own names are all free. So the accounted set is the lock's immediate predecessor plus the
+# casts recorded in `plugin-abi-history.json`. That file lives outside the lock on purpose: the lock
+# is canonicalized into the manifest copied into both images, so recording history inside it would
+# change every published digest without changing one compiled byte. Each entry carries a reason,
+# because a predecessor list nobody can justify is indistinguishable from one written to pass a
+# gate. Anything held by an identity outside the set is unexplained and fails; a registry that
+# cannot answer is never counted as free.
 
 set -Eeuo pipefail
 
@@ -61,7 +71,11 @@ esac
 "${script_dir}/plugin-abi.sh" validate --candidate
 abi_id=$("${script_dir}/plugin-abi.sh" render id)
 lock_digest=$("${script_dir}/plugin-abi.sh" render lock-digest)
-previous_abi_id=$(jq -er '.compatibility.previous_sdk.abi_id' "${lock}")
+# Validated before the registry walk for the same reason the revision is: a history file with a
+# typo would otherwise cost a full pass to report, and a reader could not tell a malformed entry
+# apart from an empty set. An empty set is a legal state; an unreadable one is not.
+validate_publish_history "${lock}"
+predecessors=$(canonical_predecessor_abi_ids "${lock}")
 tags=$("${script_dir}/plugin-abi.sh" render tags --candidate)
 
 # The owner comes from the repository context because that is where publication takes it. A probe
@@ -88,7 +102,7 @@ while IFS=$'\t' read -r identity target; do
   # answering, which is a red and never a silent allocatable.
   IFS=$'\t' read -r probe_status held_by < <(canonical_tag_probe "${target}") ||
     die "canonical tag probe returned no verdict for ${target}"
-  verdict=$(canonical_tag_verdict "${probe_status}" "${held_by}" "${abi_id}" "${previous_abi_id}")
+  verdict=$(canonical_tag_verdict "${probe_status}" "${held_by}" "${abi_id}" "${predecessors}")
   printf '%-18s %-12s %s\n' "${identity}" "${verdict}" "${target}"
   case ${verdict} in
     collision) collisions=$((collisions + 1)) ;;
@@ -111,9 +125,11 @@ if [[ -n ${record} ]]; then
   # object. Measured on PR #13, whose first record carried the merge ref. `not-in-ci` is permitted
   # only when neither source exists, and is rejected as a value rather than guessed at.
   jq -cn --arg abi_id "${abi_id}" --arg lock_digest "${lock_digest}" \
-    --arg previous_abi_id "${previous_abi_id}" \
+    --arg previous_abi_id "$(jq -er '.compatibility.previous_sdk.abi_id' "${lock}")" \
     --arg revision "${revision}" --argjson results "${results}" \
+    --argjson predecessors "$(printf '%s\n' "${predecessors}" | jq -Rsc 'split("\n") | map(select(length > 0))')" \
     '{abi_id:$abi_id,lock_digest:$lock_digest,previous_abi_id:$previous_abi_id,
+      predecessor_abi_ids:$predecessors,
       probe_revision:$revision,targets:$results}' >"${record}"
 fi
 
@@ -128,5 +144,5 @@ red=()
   red+=("${unreachable} canonical tag(s) could not be probed, which is not the same as allocatable")
 ((${#red[@]} == 0)) || die "$(printf '%s; ' "${red[@]}")"
 ((superseded == 0)) ||
-  log "${superseded} canonical tag(s) are held by the superseded contract ${previous_abi_id}; those hosts need a release_version advance or a tag re-scope, and the rest of the batch is not blocked by them"
+  log "${superseded} canonical tag(s) are held by an accounted predecessor ($(printf '%s\n' "${predecessors}" | paste -sd' ' -)); those hosts need a release_version advance or a tag re-scope, and the rest of the batch is not blocked by them"
 log "canonical tag allocatability probe passed for ${abi_id}"

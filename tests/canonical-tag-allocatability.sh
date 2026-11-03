@@ -51,6 +51,86 @@ verdict_case 'held by an unlabelled index' occupied unlabelled collision
 # A registry that could not answer is not evidence of availability.
 verdict_case 'registry could not answer' unreachable '' unreachable
 
+# A spent name can be accounted for by more than one earlier identity, and the single-slot form of
+# this classifier could only ever account for one. Measured against the live registry: `v1.0.0-plugin`
+# is held by the 2026-10-22 cast while `v1.0.0-ai-plugin` is held by a cast made under an identity
+# function this lock no longer evaluates. Whichever one the slot records, the other comes back a
+# collision, and a collision refuses the whole batch. Below, both are accounted at once.
+predecessor_set=$(printf '%s\n%s\n' "${previous_abi}" "${other_abi}")
+set_case() {
+  local description=$1 held_by=$2 expected=$3 actual
+  actual=$(canonical_tag_verdict occupied "${held_by}" "${this_abi}" "${predecessor_set}") ||
+    die "${description}: set classification failed instead of answering"
+  [[ ${actual} == "${expected}" ]] ||
+    die "${description}: expected ${expected}, found ${actual}"
+}
+set_case 'accounted by the first predecessor' "${previous_abi}" superseded
+set_case 'accounted by the second predecessor' "${other_abi}" superseded
+# Membership is exact, so an identity that merely shares a prefix with a recorded predecessor is
+# still unaccounted rather than absorbed into the set.
+set_case 'a longer identity that starts like a predecessor' "${other_abi}ab" collision
+# This lock's own identity outranks the set: the name is this contract's, so it is a republish and
+# must not be softened into superseded, which would license skipping the artifact this lock owns.
+set_case 'held by this contract while others are recorded' "${this_abi}" republish
+
+# The set is read from two places, and an entry is legal only with a reason attached: a predecessor
+# list nobody can justify is indistinguishable from a list written to make a gate pass.
+history_lock=${test_root}/history.lock
+history_file=${test_root}/history.json
+jq -cn '{abi_id: "abi-1111111111111111111111111111111111111111111111111111111111111111",
+        compatibility: {previous_sdk: {abi_id: "'${previous_abi}'"}}}' >"${history_lock}"
+printf '{ "schema_version": 1, "predecessors": [] }\n' >"${history_file}"
+[[ $(PLUGIN_ABI_HISTORY=${history_file} canonical_predecessor_abi_ids "${history_lock}") == \
+  "${previous_abi}" ]] ||
+  die 'an empty history must still yield the immediate predecessor on its own'
+
+printf '{ "schema_version": 1, "predecessors": [ { "abi_id": "%s", "reason": "abandoned cast" } ] }\n' \
+  "${other_abi}" >"${history_file}"
+PLUGIN_ABI_HISTORY=${history_file} canonical_predecessor_abi_ids "${history_lock}" \
+  >"${test_root}/set-read" || die 'reading a populated history failed'
+[[ $(wc -l <"${test_root}/set-read") == 2 ]] ||
+  die 'a populated history did not add its entry to the predecessor set'
+
+# Rejected shapes. Each of these would otherwise degrade to "no extra predecessors" -- the silent
+# direction, because it turns an accounted name back into a collision that refuses the batch.
+history_case_rejected() {
+  local description=$1 body=$2
+  printf '%s\n' "${body}" >"${history_file}"
+  # Subshelled because a rejection is signalled by `die`, which exits the whole script: without the
+  # parentheses this could not observe the failure it is asserting.
+  if (PLUGIN_ABI_HISTORY=${history_file} validate_publish_history "${history_lock}") \
+    >"${test_root}/rejected" 2>&1; then
+    echo "${description}: an invalid history was accepted" >&2
+    exit 1
+  fi
+  grep -Fq 'invalid Plugin ABI publication history' "${test_root}/rejected" ||
+    die "${description}: rejected for the wrong reason: $(tail -n 1 "${test_root}/rejected")"
+}
+history_case_rejected 'a predecessor with no reason' \
+  '{ "schema_version": 1, "predecessors": [ { "abi_id": "'"${other_abi}"'" } ] }'
+# A present but empty `reason` passes the shape check and can only be caught by the content check,
+# so it is asserted separately: without this line the two guards are interchangeable and dropping
+# either one looks safe.
+history_case_rejected 'a predecessor whose reason is an empty string' \
+  '{ "schema_version": 1, "predecessors": [ { "abi_id": "'"${other_abi}"'", "reason": "" } ] }'
+history_case_rejected 'a predecessor duplicating another' \
+  '{ "schema_version": 1, "predecessors": [ { "abi_id": "'"${other_abi}"'", "reason": "x" }, { "abi_id": "'"${other_abi}"'", "reason": "y" } ] }'
+history_case_rejected 'a lock that supersedes itself' \
+  '{ "schema_version": 1, "predecessors": [ { "abi_id": "abi-1111111111111111111111111111111111111111111111111111111111111111", "reason": "x" } ] }'
+history_case_rejected 'a malformed identity' \
+  '{ "schema_version": 1, "predecessors": [ { "abi_id": "abi-short", "reason": "x" } ] }'
+history_case_rejected 'extra keys on an entry' \
+  '{ "schema_version": 1, "predecessors": [ { "abi_id": "'"${other_abi}"'", "reason": "x", "note": "y" } ] }'
+history_case_rejected 'a predecessors field that is not an array' \
+  '{ "schema_version": 1, "predecessors": { "abi_id": "'"${other_abi}"'" } }'
+history_case_rejected 'an unknown schema version' \
+  '{ "schema_version": 2, "predecessors": [] }'
+
+# The shipped history is read by publication and by the probe, so it is validated as shipped rather
+# than only in fixtures: an entry added for convenience would otherwise reach a real gate untested.
+validate_publish_history "${repository_root}/plugin-abi.lock" ||
+  die 'the shipped plugin-abi-history.json does not validate against the shipped lock'
+
 # A status the probe cannot emit is rejected rather than defaulted, so a future probe that adds a
 # state cannot fall through to allocatable.
 if (canonical_tag_verdict invented '' "${this_abi}" "${previous_abi}") >"${test_root}/unknown" 2>&1; then
@@ -188,8 +268,20 @@ check_line=$(grep -n 'must be a full lowercase commit SHA' "${probe_script}" | h
 walk_line=$(grep -n 'IFS=$'"'"'\\t'"'"' read -r probe_status held_by' "${probe_script}" | head -1 | cut -d: -f1)
 ((check_line < walk_line)) ||
   die "the revision is validated at line ${check_line}, after the registry walk at line ${walk_line}: a typo would cost a full probe pass to report"
+
+# Same ordering rule for the publication history, asserted rather than trusted: dropping the call
+# would silently degrade the accounted set to the lock's single predecessor, which is exactly the
+# state that turns an explained name back into a batch-refusing collision.
+grep -Fq 'validate_publish_history "${lock}"' "${probe_script}" ||
+  die 'the probe no longer validates the publication history it is about to read'
+history_line=$(grep -n 'validate_publish_history "${lock}"' "${probe_script}" | head -1 | cut -d: -f1)
+((history_line < walk_line)) ||
+  die "the publication history is validated at line ${history_line}, after the registry walk at line ${walk_line}: a malformed entry would cost a full probe pass to report"
+read_line=$(grep -n 'predecessors=$(canonical_predecessor_abi_ids' "${probe_script}" | head -1 | cut -d: -f1)
+((history_line < read_line)) ||
+  die "the probe reads the predecessor set at line ${read_line} before validating it at line ${history_line}"
 grep -Fq 'PLUGIN_ABI_PROBE_REVISION: ${{ github.event.pull_request.head.sha }}' \
   "${repository_root}/.github/workflows/plugin-abi.yml" ||
   die 'the workflow no longer passes the head SHA, so records would cite an unresolvable merge ref'
 
-echo 'Canonical tag allocatability classification passed: 7 verdicts, 5 probe states, 5 pairs, 1 plan equality, 1 provenance rule.'
+echo 'Canonical tag allocatability classification passed: 7 verdicts, 5 probe states, 5 pairs, 1 plan equality, 1 provenance rule, 4 set verdicts, 2 set reads, 8 rejected history shapes, 1 shipped history.'

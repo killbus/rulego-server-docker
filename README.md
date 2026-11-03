@@ -73,6 +73,18 @@ current run still publishes the SDK and every newly allocatable host. The
 release record lists these under `superseded_hosts` so the skipped name is data,
 not a recollection. Only a tag held by an identity this lock cannot account for, or
 one the registry cannot answer for, blocks publication.
+
+The identities a release may account for are a set, not one slot: the lock's
+immediate predecessor plus the earlier casts recorded in
+[`plugin-abi-history.json`](plugin-abi-history.json). One slot was not enough --
+measured after the first publication, `v1.0.0-plugin` and `v1.0.0-ai-plugin` were
+held by two different identities, and accounting for either one alone left the
+other a collision that refused a batch whose own names were all free. Each history
+entry names an `abi_id` and carries a `reason`, because a predecessor list nobody
+can justify is indistinguishable from one written to pass a gate. The file lives
+outside the lock deliberately: the lock is canonicalized into the manifest copied
+into both images, so recording publication history inside it would change every
+published digest without changing one compiled byte.
 An `-all-plugin` host is reserved for a later release and is not produced by
 this contract.
 

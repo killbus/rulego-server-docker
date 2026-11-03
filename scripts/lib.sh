@@ -496,18 +496,79 @@ canonical_tag_plan() {
 # Publication is stricter than this by design and stays that way: it compares digests of built
 # content in one all-or-nothing gate, while a name cannot be compared to content that has not been
 # built yet. This function classifies names; it does not license a write.
+canonical_predecessor_holds() {
+  # `predecessors` is a set, one identity per line. A name can be legitimately spent by more than
+  # one earlier contract, and a single slot cannot hold both the generation this release replaced
+  # and a generation abandoned under a different identity function. Measured on the live registry
+  # with one slot: `v1.0.0-plugin` and `v1.0.0-ai-plugin` come out superseded and collision in
+  # exactly complementary pairs, so whichever single identity is recorded, the other name kills
+  # the whole batch. A set is what makes "accounted for" mean something.
+  local held_by=${1:-}
+  local predecessors=${2:-}
+  local predecessor
+
+  [[ -n ${held_by} ]] || return 1
+  while IFS= read -r predecessor; do
+    [[ -n ${predecessor} && ${held_by} == "${predecessor}" ]] && return 0
+  done <<<"${predecessors}"
+  return 1
+}
+
+# Reads the identities this release accounts for, one per line: the immediate predecessor recorded
+# in the lock, plus every earlier cast recorded in `plugin-abi-history.json`.
+#
+# The set deliberately lives OUTSIDE the lock. The lock is canonicalized into the manifest that is
+# copied into both images, so an entry added here would change every published digest without
+# changing one compiled byte -- which is the exact drift this repository records as its known gap in
+# tests/plugin-abi-identity-vectors.sh. Predecessor accounting is a publication-history fact, and
+# publication history is not an organ of the artifact.
+canonical_predecessor_abi_ids() {
+  local lock_file=${1:?Plugin ABI lock is required}
+  local history_file=${2:-${PLUGIN_ABI_HISTORY:-$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)/plugin-abi-history.json}}
+
+  [[ -f ${history_file} ]] || die "Plugin ABI publication history not found: ${history_file}"
+  jq -er '
+    ([.compatibility.previous_sdk.abi_id])[]' "${lock_file}"
+  # Not `jq -e`: an empty history is a legal state, and -e reports "no output" as a failure.
+  jq -r '.predecessors[] | .abi_id' "${history_file}"
+}
+
+# Validates the publication history against the lock it will be read with. An entry with no reason
+# is rejected because a predecessor list nobody can justify is indistinguishable from a list
+# written to make a gate pass, and an entry naming this lock's own identity would turn
+# self-supersession into a skip.
+validate_publish_history() {
+  local lock_file=${1:?Plugin ABI lock is required}
+  local history_file=${2:-${PLUGIN_ABI_HISTORY:-$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)/plugin-abi-history.json}}
+  local abi_id
+
+  [[ -f ${history_file} ]] || die "Plugin ABI publication history not found: ${history_file}"
+  abi_id=$(jq -er '.abi_id' "${lock_file}") ||
+    die "cannot read abi_id from ${lock_file}"
+  jq -e --arg self "${abi_id}" '
+    def nonempty: type == "string" and length > 0;
+    (. == {schema_version: 1, predecessors: .predecessors}) and
+    (.predecessors | type == "array") and
+    (.predecessors | all(. == {abi_id: .abi_id, reason: .reason})) and
+    ([.predecessors[].abi_id | nonempty and test("^abi-[0-9a-f]{64}$")] | all) and
+    ([.predecessors[].abi_id] | unique | length) == (.predecessors | length) and
+    ([.predecessors[].abi_id] | all(. != $self)) and
+    ([.predecessors[].reason | nonempty] | all)' "${history_file}" >/dev/null ||
+    die "invalid Plugin ABI publication history: ${history_file}"
+}
+
 canonical_tag_verdict() {
   local probe_status=${1:?probe status is required}
   local held_by=${2:-}
   local this_abi=${3:?this identity is required}
-  local previous_abi=${4:?predecessor identity is required}
+  local predecessors=${4:?predecessor identities are required}
 
   case ${probe_status} in
     absent) printf 'allocatable\n' ;;
     occupied)
       if [[ ${held_by} == "${this_abi}" ]]; then
         printf 'republish\n'
-      elif [[ ${held_by} == "${previous_abi}" ]]; then
+      elif canonical_predecessor_holds "${held_by}" "${predecessors}"; then
         printf 'superseded\n'
       else
         printf 'collision\n'
@@ -532,9 +593,11 @@ canonical_tag_verdict() {
 # verdict that must not block a release, because blocking on it makes main permanently red -- the
 # condition under which a gate gets weakened until it means nothing.
 #
-# `identity-conflict` is narrower and genuinely fatal: the holder carries *this* lock's ABI
-# identity yet a different digest, which is two packaging revisions of one contract claiming the
-# same immutable name. Advancing `release_version` is the only honest exit.
+# `identity-conflict` is narrower and genuinely fatal: the holder carries *this* lock's ABI identity
+# yet a different digest, which is two packaging revisions of one contract claiming the same
+# immutable name. Advancing `release_version` is the honest exit while a packaging revision is
+# baked into the artifact; see the note above `canonical_predecessor_holds` for why recording an
+# extra predecessor is what makes a renamed identity function survivable instead of fatal.
 #
 # `collision` is a holder this lock accounts for in neither way, and `unreachable` is a registry
 # that could not answer; neither is ever read as free.
@@ -544,7 +607,7 @@ canonical_tag_publish_decision() {
   local existing=${3:-}
   local expected=${4:?expected digest is required}
   local this_abi=${5:?this identity is required}
-  local previous_abi=${6:-}
+  local predecessors=${6:-}
 
   case ${probe_status} in
     unreachable)
@@ -561,7 +624,7 @@ canonical_tag_publish_decision() {
 
   if [[ -n ${existing} && ${existing} == "${expected}" ]]; then
     printf 'noop\n'
-  elif [[ -n ${previous_abi} && ${held_by} == "${previous_abi}" ]]; then
+  elif canonical_predecessor_holds "${held_by}" "${predecessors}"; then
     printf 'superseded\n'
   elif [[ ${held_by} == "${this_abi}" ]]; then
     printf 'identity-conflict\n'
@@ -593,13 +656,14 @@ require_immutable_tags_publishable() {
 
   # The identities compared below come from the same lock the tags were rendered from. Resolving
   # it any other way would let the verdict be evidence about a contract nobody is publishing.
-  local repository_root lock_file abi_id previous_abi
+  local repository_root lock_file abi_id predecessors
   repository_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
   lock_file=${PLUGIN_ABI_LOCK:-${repository_root}/plugin-abi.lock}
   [[ -f ${lock_file} ]] || die "Plugin ABI lock not found: ${lock_file}"
   abi_id=$(jq -er '.abi_id' "${lock_file}") || die "cannot read abi_id from ${lock_file}"
-  previous_abi=$(jq -er '.compatibility.previous_sdk.abi_id' "${lock_file}") ||
-    die "cannot read compatibility.previous_sdk.abi_id from ${lock_file}"
+  validate_publish_history "${lock_file}"
+  predecessors=$(canonical_predecessor_abi_ids "${lock_file}") ||
+    die "cannot read the predecessor identities from ${lock_file}"
 
   local target source expected existing status identity held_by probe_status decision
   local conflicts=()
@@ -626,7 +690,7 @@ require_immutable_tags_publishable() {
     fi
 
     decision=$(canonical_tag_publish_decision "${probe_status}" "${held_by}" \
-      "${existing:-}" "${expected}" "${abi_id}" "${previous_abi}")
+      "${existing:-}" "${expected}" "${abi_id}" "${predecessors}")
     case ${decision} in
       publish|noop|superseded)
         printf '%s\t%s\n' "${identity}" "${decision}"
