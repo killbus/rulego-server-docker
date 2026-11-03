@@ -51,8 +51,7 @@ host distributor -> plugin-abi.lock -> SDK image digest -> plugin .so + ABI side
                                   \-> runtime image digest -> loads the external .so
 ```
 
-The SDK discovery tag is `rulego-plugin-sdk:<abi_id>`. One SDK serves both
-plugin-capable runtime hosts:
+The SDK discovery tag is `rulego-plugin-sdk:<abi_id>`, and one SDK serves both plugin-capable hosts.
 
 Note: `<abi_id>` hashes the full `.abi` closure **including** `.abi.build.hosts`,
 so adding a variant changes `abi_id` and mints a new SDK name. Each host set is a
@@ -65,45 +64,64 @@ alter published bytes without altering any other field in `.abi`, so that the ne
 bytes arrive under a name nobody has spent. Leaving the generation alone while the
 recipe changed puts two different artifacts in contention for one immutable tag, and
 the only answer left to the publish gate is to wait for a version nobody controls.
+Three fields in the release half of the lock belong to that rule rather than being exempt from it,
+because they genuinely decide bytes: `reproducible_epoch`, the `manifest_path` the identity document
+is written to, and the editor payload. Editing any of them without advancing the generation is an
+identity conflict, and the remedy is local -- the generation moves, the name moves with it.
 
-- `rulego-server:v1.0.0-plugin` is the standard host without optional component tags.
-- `rulego-server:v1.0.0-ai-plugin` is built with `with_ai` and includes `ai/agent`.
+The two plugin-capable hosts are `plugin`, the standard host without optional component tags, and
+`ai-plugin`, built with `with_ai` and including `ai/agent`. The same ABI-compatible plugin loads in
+either runtime.
 
-The same ABI-compatible plugin can be loaded by either runtime. Consumers
-execute the OCI digests recorded in the workflow's `plugin-abi-release.json`;
-canonical tags are first-writer immutable and there are no moving aliases.
+Each host gets two public names, because one name cannot be a promise and an address at the same
+time:
 
-Content, not the commit that packaged it, decides what a published name holds. The
-image annotations name the source revision recorded in the lock; the commit that ran
-a build appears only in staging tag names, in the release record, and in the
-per-build SLSA attestation. So a rerun of an unchanged contract resolves to the two
-images already published under those names and publication writes nothing. Equality
-is judged on those two per-architecture images rather than on the multi-architecture
-index digest, which cannot repeat: the index carries one provenance and one SBOM
-member per platform, and those describe the invocation that wrote them.
+- the canonical name `rulego-server:v1.0.0-<host>-<packaging commit, first 12>` is won by one build
+  and never moved. First-writer applies: a rerun of the same commit re-wins the same name and can
+  compare equal to its own content, and any new commit arrives under a name nobody has spent.
+- the alias `rulego-server:v1.0.0-plugin` or `rulego-server:v1.0.0-ai-plugin` is the human-level name.
+  It moves, and only through `scripts/promote-runtime-aliases.sh`, after the canonical build it will
+  point at has been verified.
+  Within one `release_version` it means "the newest verified build of this release line"; it cannot
+  cross an ABI break, because an ABI break is a new `release_version`. Each promotion records where
+  the alias pointed beforehand, which is what makes a bad move reversible rather than remembered.
 
-When a host canonical tag (for example `v1.0.0-plugin`) is already held by the
-contract this lock supersedes, the publish gate records it as
-`superseded` and skips republishing it rather than blocking the whole batch.
-Consumers pinning that tag keep resolving to the earlier immutable digest; the
-current run publishes the SDK and every newly allocatable host. A host name spent by
-an earlier contract is not reopened by a later one: a new host name in the same release
-line arrives only when `release_version` advances, so a release whose host names are all
-spent publishes the SDK alone. The release record lists these under `superseded_hosts` so the skipped name is data,
-not a recollection. Only a tag held by an identity this lock cannot account for, or
-one the registry cannot answer for, blocks publication.
+Pin a digest from `plugin-abi-release.json`, or pin a canonical name. Pin an alias only when what you
+want is "whatever this release line has currently verified", and then resolve it to a digest before
+shipping. The SDK discovery tag `rulego-plugin-sdk:<abi_id>` has no alias: it is named by the identity
+it carries, so it is always the first kind of name.
 
-The identities a release may account for are a set, not one slot: the lock's
-immediate predecessor plus the earlier casts recorded in
-[`plugin-abi-history.json`](plugin-abi-history.json). One slot was not enough --
-measured after the first publication, `v1.0.0-plugin` and `v1.0.0-ai-plugin` were
-held by two different identities, and accounting for either one alone left the
-other a collision that refused a batch whose own names were all free. Each history
-entry names an `abi_id` and carries a `reason`, because a predecessor list nobody
-can justify is indistinguishable from one written to pass a gate. The file lives
-outside the lock deliberately: the lock is canonicalized into the manifest copied
-into both images, so recording publication history inside it would change every
-published digest without changing one compiled byte.
+Content, not the commit that packaged it, still decides what a published name holds. The image
+annotations name the source revision recorded in the lock, and the commit that ran a build appears in
+the canonical name, the staging tag names, the release record, and the per-build SLSA attestation --
+never in the image bytes. So a rerun of one commit re-wins its own canonical name, compares equal to
+the content already published there, and writes nothing. Equality is judged on the two
+per-architecture images rather than on the multi-architecture index digest, which cannot repeat: the
+index carries one provenance and one SBOM member per platform, and those describe the invocation that
+wrote them.
+
+The gate classifies every canonical name before it writes any of them, and a name it cannot explain
+stops the release. A canonical name already held by an identity this lock accounts for is recorded as
+`superseded`, skipped, and listed in the release record under `superseded_hosts` -- so the skipped
+name is data rather than a recollection -- while a name held by an identity outside that set, or one
+the registry could not answer for, refuses the batch. Names under the previous rule (`v1.0.0-plugin`
+without a build suffix, spent by the 2026-10-22 and 2026-11-03 casts) are the aliases now: an earlier
+cast keeps serving anyone who pins one, and the promotion step is the only thing that moves it.
+Promotion refuses a host the gate skipped, so a pointer never advances past a build this release did
+not claim.
+
+The identities a release may account for are a set, not one slot: the lock's immediate predecessor
+plus the earlier casts recorded in [`plugin-abi-history.json`](plugin-abi-history.json). One slot was
+not enough -- measured after the first publication, `v1.0.0-plugin` and `v1.0.0-ai-plugin` were held
+by two different identities, and accounting for either one alone left the other a collision that
+refused a batch whose own names were all free. Each history entry names an `abi_id` and carries a
+`reason`, because a predecessor list nobody can justify is indistinguishable from one written to pass
+a gate. The file lives outside the lock because it is publication history, not a build input: it
+records what was already shipped, and nothing a compiler reads depends on it. The manifest the images
+carry is derived from `.abi` alone, so the release half of the lock reaches an image only through the
+three fields that genuinely decide bytes -- `reproducible_epoch`, `manifest_path` and the editor
+payload -- and a change to any of those is a packaging-generation bump, not a silent edit under a
+name that is already spent.
 An `-all-plugin` host is reserved for a later release and is not produced by
 this contract.
 
@@ -262,7 +280,10 @@ It requires an explicit `publish=true` manual dispatch and approval of the
 `plugin-abi-release` environment. Native jobs stage their verified images with
 commit-qualified tags; the release job creates two-platform indexes without
 rebuilding, enforces first-writer immutable canonical tags, and verifies the
-returned GHCR digests before producing its release record.
+returned GHCR digests before producing its release record. Only after that record exists does it
+move each host alias onto the canonical index this release verified, one host at a time, writing the
+digest every alias held beforehand. A failed verification therefore leaves both tracks pointing at
+the last build that passed, which is the property a moving name has to have to be safe to publish.
 
 ## Maintenance checks
 
