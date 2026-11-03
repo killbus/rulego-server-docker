@@ -666,7 +666,7 @@ require_immutable_tags_publishable() {
     die "cannot read the predecessor identities from ${lock_file}"
 
   local target source expected existing status identity held_by probe_status decision
-  local conflicts=()
+  local identity_conflicts=() collisions=() unreachable_targets=()
   while IFS=$'\t' read -r target source identity; do
     [[ -n ${target} && -n ${source} && -n ${identity} ]] ||
       die "invalid canonical tag plan line for ${plan}"
@@ -695,16 +695,34 @@ require_immutable_tags_publishable() {
       publish|noop|superseded)
         printf '%s\t%s\n' "${identity}" "${decision}"
         ;;
-      *)
-        conflicts+=("${identity}: ${target} holds ${existing:-nothing readable} (${decision})")
-        ;;
+      identity-conflict) identity_conflicts+=("${identity} at ${target}") ;;
+      collision) collisions+=("${identity} at ${target} is held by ${held_by:-an unreadable identity}") ;;
+      unreachable) unreachable_targets+=("${identity} at ${target}") ;;
+      *) die "unexpected canonical tag publish decision for ${target}: ${decision}" ;;
     esac
   done <"${plan}"
 
-  (( ${#conflicts[@]} == 0 )) ||
-    die "no tag written; canonical tags already published for a build this lock cannot supersede: $(
-      printf '%s; ' "${conflicts[@]}"
-    ) advance abi.rulego_server.release_version before publishing this build"
+  # One message per cause. A single remedy line for three unrelated causes sends the reader to the
+  # wrong place: `advance release_version` can open a runtime name that a later contract holds, but
+  # it cannot make two different byte sets share one identity-named tag, and it has nothing to do
+  # with a registry that did not answer. The old text was measured doing exactly that -- it named
+  # the upstream release as the fix for a defect in this repository's own byte recipe.
+  (( ${#identity_conflicts[@]} + ${#collisions[@]} + ${#unreachable_targets[@]} == 0 )) && return
+  local reasons=()
+  (( ${#identity_conflicts[@]} == 0 )) ||
+    reasons+=("identity-conflict: $(printf '%s; ' "${identity_conflicts[@]}") already hold a build of \
+this contract with different bytes. Only two answers are honest: record the change in the identity \
+closure so this contract gets its own new name, or leave that name to the bytes it already holds. \
+Advancing release_version does not help, because this name is computed from the contract, not from \
+the release version.")
+  (( ${#collisions[@]} == 0 )) ||
+    reasons+=("collision: $(printf '%s; ' "${collisions[@]}"). If that identity is an earlier \
+contract this lock supersedes, add it to plugin-abi-history.json with a reason and the name becomes a \
+skip; otherwise a release nobody accounts for is published under this name and must not be displaced.")
+  (( ${#unreachable_targets[@]} == 0 )) ||
+    reasons+=("unreachable: $(printf '%s; ' "${unreachable_targets[@]}") could not be read from the \
+registry. That is not the same as the name being free; re-run once the registry answers.")
+  die "no tag written; $(printf '%s ' "${reasons[@]}")"
 }
 
 # Turns the gate's `<identity>\t<decision>` lines into the runtime hosts this release must leave

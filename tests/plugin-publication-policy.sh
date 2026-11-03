@@ -38,6 +38,12 @@ docker() {
     return
   fi
   if [[ $1 == buildx && $2 == imagetools && $3 == inspect ]]; then
+    if [[ -n ${MOCK_INSPECT_FAIL:-} ]]; then
+      # The tag resolves to something but its annotations cannot be read, which is the only way
+      # the gate reaches its `unreachable` verdict: a registry that answers nothing at all is
+      # refused earlier, before any name is classified.
+      return 65
+    fi
     if [[ -n ${MOCK_HELD_BY:-} ]]; then
       printf '{"annotations":{"io.rulego.abi.id":"%s"}}\n' "${MOCK_HELD_BY}"
       return
@@ -111,6 +117,27 @@ fi
 [[ ! -e ${docker_log} ]]
 grep -Fq 'no tag written' "${test_root}/stderr"
 grep -Fq 'runtime-plugin' "${test_root}/stderr"
+# Each cause names its own remedy. The version that read "advance abi.rulego_server.release_version"
+# for every cause was measured pointing readers at the upstream release for a defect in this
+# repository's own byte recipe, so the wrong remedy in a right rejection now fails here.
+grep -Fq 'collision:' "${test_root}/stderr"
+if grep -Fq 'release_version' "${test_root}/stderr"; then
+  echo 'the collision report must not recommend a release_version advance' >&2
+  exit 1
+fi
+
+# Same identity, different bytes: the one case where no recorded predecessor and no release_version
+# advance can help, because the name is computed from the identity that already owns it.
+MOCK_HELD_BY=$(jq -er '.abi_id' "${repository_root}/plugin-abi.lock")
+export MOCK_HELD_BY
+rm -f -- "${state}" "${docker_log}"
+if (require_immutable_tags_publishable "${canonical_plan}") >"${test_root}/stdout" 2>"${test_root}/stderr"; then
+  echo 'expected an identity conflict when this contract already holds the name with other bytes' >&2
+  exit 1
+fi
+[[ ! -e ${docker_log} ]]
+grep -Fq 'identity-conflict:' "${test_root}/stderr"
+unset MOCK_HELD_BY
 
 # An unpublished canonical tag whose sibling holds this release's digest stays
 # publishable, so a rerun of the revision that first published it succeeds.
@@ -125,6 +152,31 @@ if (require_immutable_tags_publishable "${canonical_plan}") 2>"${test_root}/stde
   exit 1
 fi
 [[ ! -e ${docker_log} ]]
+grep -Fq 'canonical tag cannot be inspected' "${test_root}/stderr"
+if grep -Fq 'release_version' "${test_root}/stderr"; then
+  echo 'an unreachable registry must not be reported as a naming decision to make' >&2
+  exit 1
+fi
+
+# A tag that resolves but whose annotations cannot be read is classified per name, and that verdict
+# must stay separate from a collision: one is an environment property to retry, the other is a fact
+# about someone else's release. `mismatched` is required here because the previous case left the
+# mock unable to resolve the tag at all, which the gate refuses before classifying any name.
+MOCK_TAG_STATE=mismatched
+MOCK_INSPECT_FAIL=1
+export MOCK_INSPECT_FAIL
+rm -f -- "${state}" "${docker_log}"
+if (require_immutable_tags_publishable "${canonical_plan}") >"${test_root}/stdout" 2>"${test_root}/stderr"; then
+  echo 'expected an unreachable verdict when tag annotations cannot be read' >&2
+  exit 1
+fi
+unset MOCK_INSPECT_FAIL
+[[ ! -e ${docker_log} ]]
+grep -Fq 'unreachable:' "${test_root}/stderr"
+if grep -Fq 'release_version' "${test_root}/stderr"; then
+  echo 'an unreachable registry must not be reported as a naming decision to make' >&2
+  exit 1
+fi
 
 if (require_immutable_tags_publishable "${test_root}/missing-plan.tsv") 2>/dev/null; then
   echo 'expected missing canonical tag plan failure' >&2
