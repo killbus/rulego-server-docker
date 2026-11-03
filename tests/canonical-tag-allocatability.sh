@@ -185,6 +185,30 @@ probe_case broken-index unreachable ''
   die 'the malformed index was read without jq objecting, so the probe did not really parse it'
 probe_case transport-error unreachable ''
 
+# The same transport read for a moving name, which additionally has to hand back the digest it read.
+# The digest is the only part of an alias report that is not derivable from the lock, so a state
+# reader that drops it leaves the reader with a name and no way to say what it serves.
+alias_state_case() {
+  local mock=$1 expected_status=$2 expected_holder=$3 expected_digest=$4 out status holder digest
+  MOCK_PROBE=${mock}
+  out=$(alias_reference_state ghcr.io/killbus/rulego-server:v1.0.0-plugin \
+    2>"${test_root}/alias-${mock}.stderr") || die "${mock}: alias state read failed instead of answering"
+  IFS=$'\t' read -r status holder digest <<<"${out}"
+  [[ ${status} == "${expected_status}" ]] ||
+    die "${mock}: alias expected status ${expected_status}, found ${status}"
+  [[ ${holder} == "${expected_holder}" ]] ||
+    die "${mock}: alias expected holder [${expected_holder}], found [${holder}]"
+  [[ ${digest} == "${expected_digest}" ]] ||
+    die "${mock}: alias expected digest [${expected_digest}], found [${digest}]"
+}
+alias_state_case free absent '' ''
+alias_state_case occupied occupied "${previous_abi}" "sha256:${other_abi#abi-}"
+alias_state_case unlabelled occupied unlabelled "sha256:${other_abi#abi-}"
+# A name that resolves but whose index cannot be parsed is not an absent name, and must not be
+# reported with a digest it never returned.
+alias_state_case broken-index unreachable '' ''
+alias_state_case transport-error unreachable '' ''
+
 # Every classification the probe can produce, run through the verdict in one pass, so a status and
 # a holder that only combine correctly together are covered as pairs rather than as samples.
 while IFS=$'\t' read -r mock expected_verdict; do
@@ -207,6 +231,35 @@ unlabelled	collision
 broken-index	unreachable
 transport-error	unreachable
 PAIRS
+
+# The same states classified for a moving name, where none of them is a failure. `current` is the
+# relation a canonical tag would call republish and a canonical gate would call nothing at all: for a
+# pointer, holding this contract's identity means the promotion already happened.
+relation_case() {
+  local description=$1 status=$2 held=$3 predecessors_set=$4 expected=$5 actual
+  actual=$(alias_reference_verdict "${status}" "${held}" "${this_abi}" "${predecessors_set}") ||
+    die "${description}: alias classification failed instead of answering"
+  [[ ${actual} == "${expected}" ]] ||
+    die "${description}: expected ${expected}, found ${actual}"
+}
+relation_case 'a pointer not published yet' absent '' "${previous_abi}" absent
+relation_case 'a pointer that could not be read' unreachable '' "${previous_abi}" unreachable
+relation_case 'a pointer serving this contract' occupied "${this_abi}" "${previous_abi}" current
+relation_case 'a pointer serving the recorded predecessor' occupied "${previous_abi}" "${previous_abi}" predecessor
+# Membership in the accounted set, not only the immediate predecessor: two casts were measured in the
+# live registry holding runtime names under two different identities.
+relation_case 'a pointer serving an earlier cast in the history' occupied "${other_abi}" "${predecessor_set}" predecessor
+relation_case 'a pointer serving an unexplained identity' occupied "${other_abi}" "${previous_abi}" unaccounted
+# Generation-1 indexes carry no identity annotation. For a canonical tag that is a collision, because
+# the batch cannot explain what it would overwrite. For a pointer it is unaccounted and harmless, and
+# the annotation is reported rather than guessed at.
+relation_case 'a pointer holding an unlabelled index' occupied unlabelled "${previous_abi}" unaccounted
+relation_case 'a pointer holding a prefix of a predecessor' occupied "${other_abi}ab" "${predecessor_set}" unaccounted
+if (alias_reference_verdict invented '' "${this_abi}" "${previous_abi}") >"${test_root}/alias-unknown" 2>&1; then
+  echo 'an invented alias probe status was accepted' >&2
+  exit 1
+fi
+grep -Fq 'unknown alias probe status' "${test_root}/alias-unknown"
 
 # The plan the probe walks must be the set of names publication writes. Publication builds its
 # canonical targets inline from the same rendered tags, the same owner and the same repository
@@ -264,6 +317,70 @@ done <"${test_root}/probe.tsv"
 jq -e '.runtime | to_entries | (all(.value.canonical != null)) and (all(.value.alias != null))' \
   <<<"${tags}" >/dev/null || die 'the rendered tags lost one of the two name tracks'
 
+# The moving names the probe reports are the moving names publication moves. Publication writes its
+# record's `runtime_aliases` from `.runtime[].alias` prefixed by the repository it derived, so the
+# derivation below is reproduced here and compared, and `scripts/promote-runtime-aliases.sh` compares
+# the record against a re-render at runtime. Three checks on one rule is deliberate: the report is
+# read by a person deciding whether to publish, and a report about a name publication never writes is
+# worse than no report.
+{
+  while IFS=$'\t' read -r host_id alias_name; do
+    printf 'runtime-%s\t%s:%s\n' "${host_id}" "${runtime_repository}" "${alias_name#*:}"
+  done < <(jq -r '.runtime | to_entries[] | [.key, .value.alias] | @tsv' <<<"${tags}")
+} >"${test_root}/publication-aliases.tsv"
+alias_tag_plan "${tags}" "${owner}" >"${test_root}/probe-aliases.tsv"
+cmp -s "${test_root}/publication-aliases.tsv" "${test_root}/probe-aliases.tsv" ||
+  die "the probe reports a different set of moving names than publication moves:
+publication: $(tr '\t' ' ' <"${test_root}/publication-aliases.tsv")
+probe: $(tr '\t' ' ' <"${test_root}/probe-aliases.tsv")"
+grep -Fq 'runtime_aliases=$(jq -c --arg repository "${runtime_repository}"' scripts/plugin-abi-publish.sh ||
+  die 'publication no longer derives its recorded aliases from the rendered alias and the repository, so the comparison above would be a tautology'
+# The alias plan is the canonical plan's complement, not a superset of it: no line may appear in both,
+# and the SDK may appear in neither alias list, because a name that is its own identity has no pointer.
+if comm -12 <(cut -f2 "${test_root}/probe.tsv" | sort) \
+  <(cut -f2 "${test_root}/probe-aliases.tsv" | sort) | grep -q .; then
+  echo 'a name appears in both the first-writer plan and the moving-name plan' >&2
+  exit 1
+fi
+(( $(wc -l <"${test_root}/probe-aliases.tsv") == $(jq -r '.runtime | length' <<<"${tags}") )) ||
+  die 'the moving-name plan does not cover exactly the locked hosts'
+if grep -qF 'plugin-sdk' "${test_root}/probe-aliases.tsv"; then
+  echo 'the moving-name plan carries an SDK name, which has no pointer to it' >&2
+  exit 1
+fi
+# The probe must actually walk and record what it derives, or all of the above is a function nothing
+# calls.
+grep -Fq 'alias_plan=$(alias_tag_plan "${tags}" "${owner}")' scripts/probe-canonical-tags.sh ||
+  die 'the probe no longer derives the moving names it claims to report'
+grep -Fq 'aliases:$alias_results' scripts/probe-canonical-tags.sh ||
+  die 'the probe reports moving names on stdout but leaves them out of the machine-readable record'
+probe_src=scripts/probe-canonical-tags.sh
+record_start=$(grep -n 'jq -cn --arg abi_id' "${probe_src}" | head -1 | cut -d: -f1)
+[[ -n ${record_start} ]] || die 'the probe record program was not found to check its bindings'
+record_end=$(grep -n '>"${record}"' "${probe_src}" | tail -1 | cut -d: -f1)
+(( ${record_end} > ${record_start} )) ||
+  die 'the probe record program has no closing write to check its bindings against'
+record_program=$(sed -n "${record_start},${record_end}p" "${probe_src}")
+# A field named in a jq program with no binding is a compile error on the path that writes the
+# record, and that path needs a registry, so no offline case reaches it. Measured on this branch's
+# first live probe run: the alias field was added to the program without its argjson binding, the
+# canonical walk had already spent a full pass against GHCR, and the record was lost after a probe
+# that printed as if it had passed. Shell variables here are written with braces and command
+# substitutions start with a parenthesis, so a bare dollar-name in this region can only be a jq
+# variable, and every one of them must have a binding.
+jq_bound=$(printf '%s\n' "${record_program}" | grep -oE -- '--arg(json)? [a-z_]+' | awk '{print $2}' | sort -u)
+jq_used=$(printf '%s\n' "${record_program}" | grep -oE '\$[a-z][a-z_0-9]*' | sed 's/^.//' | sort -u)
+jq_unbound=$(comm -13 <(printf '%s\n' "${jq_bound}") <(printf '%s\n' "${jq_used}"))
+[[ -z ${jq_unbound} ]] ||
+  die "the probe record references jq variables with no binding: $(printf '%s ' ${jq_unbound})"
+# And no alias state may ever join the list that reddens the job: a pointer is not a promise, and a red
+# pull request because `v1.0.0-plugin` still serves last week's verified build is how a gate starts
+# being ignored.
+if grep -Eq 'red\+=\("?\$\{?alias' scripts/probe-canonical-tags.sh; then
+  echo 'a moving-name state was made able to redden the allocatability probe' >&2
+  exit 1
+fi
+
 # Publication may not render names in the pre-build mode: `none` makes every canonical runtime name
 # null, and a plan with the hosts missing would approve a batch that no longer contains them.
 grep -Fq 'export PLUGIN_ABI_NAME_REVISION=${packaging_revision}' "${publish}" ||
@@ -310,4 +427,4 @@ grep -Fq 'PLUGIN_ABI_PROBE_REVISION: ${{ github.event.pull_request.head.sha }}' 
   "${repository_root}/.github/workflows/plugin-abi.yml" ||
   die 'the workflow no longer passes the head SHA, so records would cite an unresolvable merge ref'
 
-echo 'Canonical tag allocatability classification passed: 7 verdicts, 5 probe states, 5 pairs, 1 plan equality, 1 provenance rule, 4 set verdicts, 2 set reads, 8 rejected history shapes, 1 shipped history.'
+echo 'Canonical tag allocatability classification passed: 7 verdicts, 5 probe states, 5 pairs, 1 plan equality, 1 provenance rule, 4 set verdicts, 2 set reads, 8 rejected history shapes, 1 shipped history, 5 alias states, 8 alias relations, 1 alias plan equality, 3 alias plan rules, 3 alias probe wirings, 1 record binding check.'

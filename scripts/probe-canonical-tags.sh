@@ -24,6 +24,12 @@
 # `io.rulego.abi.id` into every canonical index, and the identity it names is read from the lock
 # rather than retyped.
 #
+# The moving names are read along with the canonical ones and never judged. A pointer holding an
+# earlier verified build is the ordinary state of a pointer, and the question a reader asks about it
+# -- which bytes does the public name serve today -- has no other answer in this repository before a
+# release runs. Reporting it on the pull request is what makes the gap between a public name and a
+# verified build visible at the moment the change that widens it is merged.
+#
 # One recorded predecessor is not always enough. Measured after the first real publication, two
 # runtime names were spent by two different identities -- the contract this lock replaced, and an
 # earlier cast made under an identity function this lock no longer evaluates -- and a single slot
@@ -109,7 +115,7 @@ republish=0
 # a local run look like evidence about names nothing has chosen yet.
 if [[ ${PLUGIN_ABI_NAME_REVISION} == none ]]; then
   log 'no build identity is available, so the per-build canonical runtime names are not probed; the'
-  log 'SDK canonical name and the aliases are reported below'
+  log 'SDK canonical name is still probed and the moving names are still read below'
 fi
 while IFS=$'\t' read -r identity target; do
   [[ -n ${identity} && -n ${target} ]] || die "invalid canonical target plan line for ${identity}"
@@ -129,12 +135,46 @@ while IFS=$'\t' read -r identity target; do
     superseded) superseded=$((superseded + 1)) ;;
     republish) republish=$((republish + 1)) ;;
   esac
-  results=$(jq -c --arg identity "${identity}" --arg target "${target}" \
+    results=$(jq -c --arg identity "${identity}" --arg target "${target}" \
     --arg probe_status "${probe_status}" --arg held_by "${held_by}" --arg verdict "${verdict}" \
     '. += [{identity:$identity,target:$target,probe_status:$probe_status,
             held_by_abi_id:(if $held_by=="" then null else $held_by end),verdict:$verdict}]' \
     <<<"${results}")
 done <<<"${plan}"
+
+# The moving names, read but never judged.
+#
+# An alias is not part of the allocatability question above: it is a pointer, first-writer does not
+# apply to it, and nothing about this release can be blocked by what it currently serves. What a
+# reader wants to know is what `v1.0.0-plugin` resolves to today and whether that content belongs to
+# this contract, an accounted predecessor, or nobody -- the last of which is a fact no other check
+# states, because a pointer holding an unexplained identity is legal and passes. The names come from
+# `alias_tag_plan`, derived alongside the canonical plan so the report cannot describe a set of names
+# different from the set publication moves.
+alias_plan=$(alias_tag_plan "${tags}" "${owner}")
+alias_results='[]'
+alias_unaccounted=0
+alias_absent=0
+alias_unreachable=0
+while IFS=$'\t' read -r identity target; do
+  [[ -n ${identity} && -n ${target} ]] || die "invalid alias plan line for ${identity}"
+  IFS=$'\t' read -r alias_status alias_held alias_digest < <(alias_reference_state "${target}") ||
+    die "alias probe returned no verdict for ${target}"
+  relation=$(alias_reference_verdict "${alias_status}" "${alias_held}" "${abi_id}" "${predecessors}")
+  printf '%-18s %-12s %s %s\n' "${identity}" "alias:${relation}" "${target}" "${alias_digest:--}"
+  case ${relation} in
+    unaccounted) alias_unaccounted=$((alias_unaccounted + 1)) ;;
+    absent) alias_absent=$((alias_absent + 1)) ;;
+    unreachable) alias_unreachable=$((alias_unreachable + 1)) ;;
+  esac
+  alias_results=$(jq -c --arg identity "${identity}" --arg target "${target}" \
+    --arg probe_status "${alias_status}" --arg held_by "${alias_held}" --arg digest "${alias_digest}" \
+    --arg relation "${relation}" \
+    '. += [{identity:$identity,target:$target,probe_status:$probe_status,
+            held_by_abi_id:(if $held_by=="" then null else $held_by end),
+            digest:(if $digest=="" then null else $digest end),relation:$relation}]' \
+    <<<"${alias_results}")
+done <<<"${alias_plan}"
 
 if [[ -n ${record} ]]; then
   mkdir -p -- "$(dirname -- "${record}")"
@@ -148,10 +188,12 @@ if [[ -n ${record} ]]; then
     --arg previous_abi_id "$(jq -er '.compatibility.previous_sdk.abi_id' "${lock}")" \
     --arg revision "${revision}" --arg name_revision "${PLUGIN_ABI_NAME_REVISION}" \
     --argjson results "${results}" \
+    --argjson alias_results "${alias_results}" \
     --argjson predecessors "$(printf '%s\n' "${predecessors}" | jq -Rsc 'split("\n") | map(select(length > 0))')" \
     '{abi_id:$abi_id,lock_digest:$lock_digest,previous_abi_id:$previous_abi_id,
       predecessor_abi_ids:$predecessors,
-      probe_revision:$revision,name_revision:$name_revision,targets:$results}' >"${record}"
+      probe_revision:$revision,name_revision:$name_revision,targets:$results,
+      aliases:$alias_results}' >"${record}"
 fi
 
 # Counted separately because the two send the reader to different places: an unaccounted holder is
@@ -168,4 +210,15 @@ red=()
   log "${republish} canonical tag(s) already carry this contract's identity; publication writes nothing for them only when this build's bytes equal the bytes already published under those names, and this job builds nothing, so it reports the state instead of calling it free"
 ((superseded == 0)) ||
   log "${superseded} canonical tag(s) are held by an accounted predecessor ($(printf '%s\n' "${predecessors}" | paste -sd' ' -)); publication leaves those hosts alone and their names keep resolving to the bytes that predecessor published, so nothing else in this batch is blocked by them"
+# Reported and never required. The three states say different things about the public name, and none
+# of them says anything about whether this release may proceed: `current` means the pointer already
+# follows this contract, `absent` means nothing has published it yet, `unaccounted` means it serves an
+# identity no record explains. That last one is the reason this section exists -- it is legal, it
+# blocks nothing, and before this report nothing in the pipeline ever said it out loud.
+((alias_unaccounted == 0)) ||
+  log "${alias_unaccounted} moving name(s) serve an identity neither this lock nor the publication history accounts for; promotion is what changes that, and this release is not blocked by it"
+((alias_absent == 0)) ||
+  log "${alias_absent} moving name(s) are not published yet; the first verified promotion of this release line creates them"
+((alias_unreachable == 0)) ||
+  log "${alias_unreachable} moving name(s) could not be read; unlike a canonical name, an unread alias changes nothing about this release, because a pointer is not a first-writer promise"
 log "canonical tag allocatability probe passed for ${abi_id}"
