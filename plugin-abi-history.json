@@ -1,4 +1,9 @@
 {
   "schema_version": 1,
-  "predecessors": []
+  "predecessors": [
+    {
+      "abi_id": "abi-7ef7f30db8598b7fdce710287df49bdb047d165749b749fe86c0ef448daf0c3f",
+      "reason": "Packaging generation 1 wrote org.opencontainers.image.revision from the build commit into the image config, so its artifacts cannot be reproduced by the current recipe. Its canonical SDK name and the runtime names published with it are spent: the release that carries them stays served by those bytes, and .abi.packaging was added so a recipe change renames rather than collides."
+    }
+  ]
 }

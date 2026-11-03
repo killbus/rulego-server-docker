@@ -92,6 +92,7 @@ results='[]'
 collisions=0
 unreachable=0
 superseded=0
+republish=0
 while IFS=$'\t' read -r identity target; do
   [[ -n ${identity} && -n ${target} ]] || die "invalid canonical target plan line for ${identity}"
   probe_status=''
@@ -108,6 +109,7 @@ while IFS=$'\t' read -r identity target; do
     collision) collisions=$((collisions + 1)) ;;
     unreachable) unreachable=$((unreachable + 1)) ;;
     superseded) superseded=$((superseded + 1)) ;;
+    republish) republish=$((republish + 1)) ;;
   esac
   results=$(jq -c --arg identity "${identity}" --arg target "${target}" \
     --arg probe_status "${probe_status}" --arg held_by "${held_by}" --arg verdict "${verdict}" \
@@ -143,6 +145,8 @@ red=()
 ((unreachable == 0)) ||
   red+=("${unreachable} canonical tag(s) could not be probed, which is not the same as allocatable")
 ((${#red[@]} == 0)) || die "$(printf '%s; ' "${red[@]}")"
+((republish == 0)) ||
+  log "${republish} canonical tag(s) already carry this contract's identity; publication writes nothing for them only when this build's bytes equal the bytes already published under those names, and this job builds nothing, so it reports the state instead of calling it free"
 ((superseded == 0)) ||
-  log "${superseded} canonical tag(s) are held by an accounted predecessor ($(printf '%s\n' "${predecessors}" | paste -sd' ' -)); those hosts need a release_version advance or a tag re-scope, and the rest of the batch is not blocked by them"
+  log "${superseded} canonical tag(s) are held by an accounted predecessor ($(printf '%s\n' "${predecessors}" | paste -sd' ' -)); publication leaves those hosts alone and their names keep resolving to the bytes that predecessor published, so nothing else in this batch is blocked by them"
 log "canonical tag allocatability probe passed for ${abi_id}"

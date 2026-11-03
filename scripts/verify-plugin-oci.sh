@@ -48,13 +48,6 @@ verify_index() {
   repository=${ref%@*}
   docker buildx imagetools inspect "${ref}" --format '{{json .Manifest}}' >"${index}"
   expected_index=$("${script_dir}/plugin-abi.sh" render metadata "${variant}" '' "${host_id}")
-  if [[ -n ${PLUGIN_ABI_PACKAGING_SOURCE:-} ]]; then
-    expected_index=$(jq -c --arg source "${PLUGIN_ABI_PACKAGING_SOURCE}" '. + {"org.opencontainers.image.source":$source}' <<<"${expected_index}")
-  fi
-  if [[ -n ${PLUGIN_ABI_PACKAGING_REVISION:-} ]]; then
-    expected_index=$(jq -c --arg revision "${PLUGIN_ABI_PACKAGING_REVISION}" \
-      '. + {"org.opencontainers.image.revision":$revision}' <<<"${expected_index}")
-  fi
   jq -e --argjson expected "${expected_index}" '. as $index |
     (.manifests | map(select(.platform.os == "linux" and (.platform.architecture == "amd64" or .platform.architecture == "arm64")))) as $images |
     (.manifests | map(select(.platform.os == "unknown" and .platform.architecture == "unknown" and .annotations["vnd.docker.reference.type"] == "attestation-manifest"))) as $attestations |
@@ -86,13 +79,6 @@ verify_index() {
     retry_command 4 2 docker pull --platform "linux/${arch}" "${child_ref}" >/dev/null
     uncompressed=$(docker image inspect "${child_ref}" --format '{{.Size}}')
     expected_child=$("${script_dir}/plugin-abi.sh" render metadata "${variant}" "${arch}" "${host_id}")
-    if [[ -n ${PLUGIN_ABI_PACKAGING_SOURCE:-} ]]; then
-      expected_child=$(jq -c --arg source "${PLUGIN_ABI_PACKAGING_SOURCE}" '. + {"org.opencontainers.image.source":$source}' <<<"${expected_child}")
-    fi
-    if [[ -n ${PLUGIN_ABI_PACKAGING_REVISION:-} ]]; then
-      expected_child=$(jq -c --arg revision "${PLUGIN_ABI_PACKAGING_REVISION}" \
-        '. + {"org.opencontainers.image.revision":$revision}' <<<"${expected_child}")
-    fi
     labels=$(docker image inspect "${child_ref}" --format '{{json .Config.Labels}}')
     jq -e --argjson expected "${expected_child}" '. as $labels |
       ($expected | to_entries | all(.[]; $labels[.key] == .value)) and

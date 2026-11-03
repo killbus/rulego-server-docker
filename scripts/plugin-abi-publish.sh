@@ -21,7 +21,11 @@ abi_id=$("${script_dir}/plugin-abi.sh" render id)
 lock_digest=$("${script_dir}/plugin-abi.sh" render lock-digest)
 packaging_revision=${GITHUB_SHA:?GITHUB_SHA is required}
 [[ ${packaging_revision} =~ ^[0-9a-f]{40}$ ]] || die 'GITHUB_SHA must be a full lowercase commit revision'
-source_url=${GITHUB_SERVER_URL:-https://github.com}/${GITHUB_REPOSITORY:?GITHUB_REPOSITORY is required}
+# `packaging_revision` qualifies staging tag names and the release record only. It is deliberately
+# absent from index annotations and image labels: a per-commit value there moves a digest on every
+# build, so a canonical tag could never compare equal to its own content and could not be republished
+# without reading as a conflict. Which commit packaged a release stays in the SLSA attestation, which
+# buildx writes per invocation anyway.
 owner=${GITHUB_REPOSITORY_OWNER:?GITHUB_REPOSITORY_OWNER is required}
 owner=${owner,,}
 tags=$("${script_dir}/plugin-abi.sh" render tags)
@@ -105,10 +109,6 @@ index_annotations() {
   while IFS= read -r annotation; do INDEX_ANNOTATIONS+=(--annotation "index:${annotation}"); done < <(
     "${script_dir}/plugin-abi.sh" render metadata "${variant}" '' "${host_id}" |
       jq -r 'to_entries[] | "\(.key)=\(.value)"'
-    printf '%s\n' \
-      "org.opencontainers.image.source=${source_url}" \
-      "org.opencontainers.image.revision=${packaging_revision}" \
-      'org.opencontainers.image.licenses=Apache-2.0'
   )
 }
 
@@ -158,18 +158,30 @@ while IFS=$'\t' read -r host_id runtime_index; do
 done < <(jq -r 'to_entries[] | [.key, .value] | @tsv' <<<"${runtime_staging_indexes}")
 
 PLUGIN_ABI_SIZE_REPORT=${TMPDIR}/staging-sizes.tsv \
-PLUGIN_ABI_PACKAGING_SOURCE=${source_url} \
-PLUGIN_ABI_PACKAGING_REVISION=${packaging_revision} \
   "${script_dir}/verify-plugin-oci.sh" "${sdk_staging_index}" "${runtime_staging_indexes}" release
 
 # Every canonical tag is probed before the first write so a conflicting tag
 # cannot leave a partially published release behind.
 canonical_plan=${TMPDIR}/canonical-tags.tsv
 : >"${canonical_plan}"
-printf '%s\t%s\t%s\n' "${sdk_canonical}" "${sdk_staging_index}" plugin-sdk >>"${canonical_plan}"
+
+# The child digests are taken from the native build evidence rather than from the staging indexes
+# about to be published, because the evidence is what the per-architecture runners produced and
+# what `verify_index_children` already holds those indexes against. A plan built from the new index
+# digest could only ever ask the registry to compare two things that differ by design.
+plan_children() {
+  local selector=$1
+  printf '%s\t%s\n' \
+    "$(jq -er "${selector}.child_digest" "${evidence_dir}/plugin-abi-amd64.json")" \
+    "$(jq -er "${selector}.child_digest" "${evidence_dir}/plugin-abi-arm64.json")"
+}
+
+printf '%s\t%s\t%s\t%s\n' "${sdk_canonical}" "${sdk_staging_index}" plugin-sdk \
+  "$(plan_children '.sdk')" >>"${canonical_plan}"
 while IFS=$'\t' read -r host_id runtime_index; do
   runtime_name=$(jq -er --arg host_id "${host_id}" '.runtime[$host_id]' <<<"${tags}")
-  printf '%s\t%s\t%s\n' "${runtime_repository}:${runtime_name#*:}" "${runtime_index}" "runtime-${host_id}" >>"${canonical_plan}"
+  printf '%s\t%s\t%s\t%s\n' "${runtime_repository}:${runtime_name#*:}" "${runtime_index}" \
+    "runtime-${host_id}" "$(plan_children ".runtime[\"${host_id}\"]")" >>"${canonical_plan}"
 done < <(jq -r 'to_entries[] | [.key, .value] | @tsv' <<<"${runtime_staging_indexes}")
 # The gate classifies every canonical name before the first write. Only a `superseded` runtime
 # host is left alone: an earlier contract holds that name, and its digest still answers to it.
@@ -182,7 +194,9 @@ superseded_hosts=$(canonical_superseded_hosts "${gate_decisions}")
 canonical_sdk_superseded "${gate_decisions}" ||
   die 'the SDK canonical tag reads as superseded; a release without its SDK is not publishable'
 
-sdk_ref=$(publish_immutable_image_tag "${sdk_canonical}" "${sdk_staging_index}")
+IFS=$'\t' read -r sdk_amd64_child sdk_arm64_child <<<"$(plan_children '.sdk')"
+sdk_ref=$(publish_immutable_image_tag "${sdk_canonical}" "${sdk_staging_index}" \
+  "${sdk_amd64_child}" "${sdk_arm64_child}")
 runtime_refs='{}'
 while IFS= read -r host_id; do
   if jq -e --arg host "${host_id}" 'index($host) != null' <<<"${superseded_hosts}" >/dev/null; then
@@ -192,14 +206,14 @@ while IFS= read -r host_id; do
   runtime_name=$(jq -er --arg host_id "${host_id}" '.runtime[$host_id]' <<<"${tags}")
   runtime_canonical=${runtime_repository}:${runtime_name#*:}
   runtime_index=$(jq -er --arg host_id "${host_id}" '.[$host_id]' <<<"${runtime_staging_indexes}")
-  runtime_ref=$(publish_immutable_image_tag "${runtime_canonical}" "${runtime_index}")
+  IFS=$'\t' read -r host_amd64_child host_arm64_child <<<"$(plan_children ".runtime[\"${host_id}\"]")"
+  runtime_ref=$(publish_immutable_image_tag "${runtime_canonical}" "${runtime_index}" \
+    "${host_amd64_child}" "${host_arm64_child}")
   runtime_refs=$(jq -c --arg host_id "${host_id}" --arg ref "${runtime_ref}" \
     '.[$host_id] = $ref' <<<"${runtime_refs}")
 done < <(jq -r '.hosts[].id' <<<"${ci_json}")
 
 PLUGIN_ABI_SIZE_REPORT=${TMPDIR}/published-sizes.tsv \
-PLUGIN_ABI_PACKAGING_SOURCE=${source_url} \
-PLUGIN_ABI_PACKAGING_REVISION=${packaging_revision} \
   PLUGIN_ABI_SUPERSEDED_HOSTS="${superseded_hosts}" \
   "${script_dir}/verify-plugin-oci.sh" "${sdk_ref}" "${runtime_refs}" release
 

@@ -58,6 +58,14 @@ Note: `<abi_id>` hashes the full `.abi` closure **including** `.abi.build.hosts`
 so adding a variant changes `abi_id` and mints a new SDK name. Each host set is a
 distinct ABI identity until the identity domain is narrowed (contract pending).
 
+The closure also carries `.abi.packaging.version`, the packaging generation. It is
+there because the recipe decides the artifact bytes: the two Dockerfiles, the flags
+they pass, and where the ABI manifest is written. Bump it whenever a change would
+alter published bytes without altering any other field in `.abi`, so that the new
+bytes arrive under a name nobody has spent. Leaving the generation alone while the
+recipe changed puts two different artifacts in contention for one immutable tag, and
+the only answer left to the publish gate is to wait for a version nobody controls.
+
 - `rulego-server:v1.0.0-plugin` is the standard host without optional component tags.
 - `rulego-server:v1.0.0-ai-plugin` is built with `with_ai` and includes `ai/agent`.
 
@@ -65,12 +73,23 @@ The same ABI-compatible plugin can be loaded by either runtime. Consumers
 execute the OCI digests recorded in the workflow's `plugin-abi-release.json`;
 canonical tags are first-writer immutable and there are no moving aliases.
 
+Content, not the commit that packaged it, decides what a published name holds. The
+image annotations name the source revision recorded in the lock; the commit that ran
+a build appears only in staging tag names, in the release record, and in the
+per-build SLSA attestation. So a rerun of an unchanged contract resolves to the two
+images already published under those names and publication writes nothing. Equality
+is judged on those two per-architecture images rather than on the multi-architecture
+index digest, which cannot repeat: the index carries one provenance and one SBOM
+member per platform, and those describe the invocation that wrote them.
+
 When a host canonical tag (for example `v1.0.0-plugin`) is already held by the
 contract this lock supersedes, the publish gate records it as
 `superseded` and skips republishing it rather than blocking the whole batch.
 Consumers pinning that tag keep resolving to the earlier immutable digest; the
-current run still publishes the SDK and every newly allocatable host. The
-release record lists these under `superseded_hosts` so the skipped name is data,
+current run publishes the SDK and every newly allocatable host. A host name spent by
+an earlier contract is not reopened by a later one: a new host name in the same release
+line arrives only when `release_version` advances, so a release whose host names are all
+spent publishes the SDK alone. The release record lists these under `superseded_hosts` so the skipped name is data,
 not a recollection. Only a tag held by an identity this lock cannot account for, or
 one the registry cannot answer for, blocks publication.
 
@@ -248,6 +267,31 @@ starting containers:
 scripts/fetch-release.sh v1.0.0 standard
 scripts/fetch-release.sh v1.0.0 all
 ```
+
+The compatibility record in `plugin-abi.lock` names the published SDK image that
+the previous-generation probe loads. Two of its four values are registry digests
+that nothing in this repository computes, so they are never typed by hand: a wrong
+digit still validates, and only the probe would notice. Point the helper at the
+revision whose lock was the released contract and paste what it prints:
+
+```bash
+block=$(scripts/derive-compatibility-sdk.sh derive <revision-of-the-previous-release>)
+jq --argjson block "${block}" '.compatibility.previous_sdk = $block' \
+  plugin-abi.lock >next.lock && mv next.lock plugin-abi.lock
+scripts/plugin-abi.sh validate --candidate
+```
+
+The helper reads the identity from that revision's lock and the digests from the
+registry, and refuses rather than guess: no lock in the revision, a lock that is
+not a valid contract, a tag nobody published, a registry that would not answer, an
+index missing an architecture, an index that resolves both architectures to one
+digest, or a tag that moved between its two reads.
+
+`scripts/derive-compatibility-sdk.sh check` reads the other way round: it takes the
+record the lock already carries and compares it with the published index and both
+architecture images. The pull-request job that probes canonical tags runs it on
+every change, so a record that names bytes nobody published fails before merge
+rather than at the release that would have pulled them.
 
 Run the local static and failure-injection gates with:
 

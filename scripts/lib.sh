@@ -396,24 +396,53 @@ verify_exact_image_children() {
   local output=${4:?manifest output path is required}
 
   docker buildx imagetools inspect "${reference}" --format '{{json .Manifest}}' >"${output}"
+  # `// []` keeps a manifest without an image list answering "not these images" instead of failing
+  # inside jq: the caller that has to distinguish a refusal from an unreadable registry is the tag
+  # probe, and it should not have to do that through a jq error message in the release log.
   jq -e --arg amd64 "${amd64_digest}" --arg arm64 "${arm64_digest}" '
-    ([.manifests[] | select(.platform.os == "linux") |
+    ([(.manifests // [])[] | select(.platform.os == "linux") |
       {architecture:.platform.architecture,digest:.digest}] | sort_by(.architecture)) ==
     [{architecture:"amd64",digest:$amd64},{architecture:"arm64",digest:$arm64}]
   ' "${output}" >/dev/null
 }
 
+# True when the images an existing index resolves to are exactly the two children this build
+# produced. Index annotations and attestation members are excluded on purpose: they record the
+# invocation that first wrote them, while the two linux children are the artifacts consumers run.
+# This is the comparison `tests/plugin-abi-drivers.sh` says the reproducibility recheck must use,
+# applied to publication so an unchanged contract can be released again without a write.
+canonical_index_holds_children() {
+  local target=${1:?canonical target is required}
+  local amd64_child=${2:?amd64 child digest is required}
+  local arm64_child=${3:?arm64 child digest is required}
+
+  [[ ${amd64_child} =~ ^sha256:[0-9a-f]{64}$ ]] ||
+    die "amd64 child digest is required for ${target}"
+  [[ ${arm64_child} =~ ^sha256:[0-9a-f]{64}$ ]] ||
+    die "arm64 child digest is required for ${target}"
+  verify_exact_image_children "${target}" "${amd64_child}" "${arm64_child}" \
+    "${TMPDIR:-/tmp}/canonical-index-children.$$.json"
+}
+
 publish_immutable_image_tag() {
   local target=${1:?target image tag is required}
   local source=${2:?source image digest is required}
+  local amd64_child=${3:?amd64 child digest is required}
+  local arm64_child=${4:?arm64 child digest is required}
   local expected=${source##*@}
   local existing status
 
   [[ ${source} =~ @sha256:[0-9a-f]{64}$ ]] || die "source image must be addressed by digest: ${source}"
   if existing=$(image_reference_digest "${target}"); then
-    [[ ${existing} == "${expected}" ]] || die "immutable tag already points to a different digest: ${target}"
-    printf '%s@%s\n' "${target%:*}" "${existing}"
-    return
+    # Writing nothing is correct whenever the name already resolves to this build's images, even
+    # though the index digest above it differs: the two attestation members inside that index
+    # describe whichever invocation wrote them first, and the name belongs to that first writer.
+    if [[ ${existing} == "${expected}" ]] ||
+      canonical_index_holds_children "${target}" "${amd64_child}" "${arm64_child}"; then
+      printf '%s@%s\n' "${target%:*}" "${existing}"
+      return
+    fi
+    die "immutable tag already resolves to different images than this build produced: ${target}"
   else
     status=$?
     ((status == 1)) || return "${status}"
@@ -583,9 +612,19 @@ canonical_tag_verdict() {
 # It performs no I/O so the rule that unblocks a release stays testable offline: a registry
 # answer is the only input that needs one.
 #
-# `noop` is the case `publish_immutable_image_tag` already tolerates: the name holds exactly the
-# digest this build produced, so a rerun of the revision that first published it needs no write.
-# It is checked before any identity comparison because content equality outranks provenance.
+# `content_matches` answers one question and nothing else: do the images this build produced equal
+# the images that the published index already resolves to? It is deliberately not "is the index
+# digest equal", because a multi-architecture index carries one SLSA provenance and one SBOM
+# attestation member per platform, and those members describe the invocation that built them, so
+# the index digest moves on every build by design. `scripts/plugin-abi-build.sh` compares child
+# digests for the same reason, and `verify_exact_image_children` is the check publication reuses.
+# Judging equality at the index would make an unchanged contract impossible to republish: every
+# rerun would differ, every difference would read as a conflict, and the only advice the gate could
+# offer would be to wait for a name nobody has claimed yet.
+#
+# `noop` is the case `publish_immutable_image_tag` tolerates: the name already resolves to this
+# build's images, so a rerun needs no write. It is checked before any identity comparison because
+# content equality outranks provenance.
 #
 # `superseded` means an earlier contract owns the name. Runtime canonical tags are named after the
 # upstream release alone, so once that contract claimed the name no later lock can; the earlier
@@ -604,10 +643,12 @@ canonical_tag_verdict() {
 canonical_tag_publish_decision() {
   local probe_status=${1:?probe status is required}
   local held_by=${2:-}
-  local existing=${3:-}
-  local expected=${4:?expected digest is required}
-  local this_abi=${5:?this identity is required}
-  local predecessors=${6:-}
+  local content_matches=${3:?content comparison result is required}
+  local this_abi=${4:?this identity is required}
+  local predecessors=${5:-}
+
+  [[ ${content_matches} == yes || ${content_matches} == no ]] ||
+    die "content comparison must be answered yes or no, found: ${content_matches}"
 
   case ${probe_status} in
     unreachable)
@@ -622,7 +663,7 @@ canonical_tag_publish_decision() {
     *) die "unknown canonical tag probe status: ${probe_status}" ;;
   esac
 
-  if [[ -n ${existing} && ${existing} == "${expected}" ]]; then
+  if [[ ${content_matches} == yes ]]; then
     printf 'noop\n'
   elif canonical_predecessor_holds "${held_by}" "${predecessors}"; then
     printf 'superseded\n'
@@ -649,7 +690,11 @@ canonical_tag_publish_decision() {
 #
 # A real conflict still refuses the whole batch. That is the point of the gate: a release that
 # cannot claim all the names it means to claim should claim none of them.
-# Each plan line is <canonical-target>\t<digest-addressed-source>\t<identity>.
+# Each plan line is <canonical-target>\t<digest-addressed-source>\t<identity>\t<amd64-child>\t<arm64-child>.
+# The two child digests come from the native build evidence, which is the same source
+# `verify_index_children` checks the staging indexes against, so the gate and the writer compare the
+# release plan with the bytes that were actually produced rather than with an index that cannot be
+# reproduced by design.
 require_immutable_tags_publishable() {
   local plan=${1:?canonical tag plan is required}
   [[ -f ${plan} ]] || die "canonical tag plan not found: ${plan}"
@@ -665,21 +710,28 @@ require_immutable_tags_publishable() {
   predecessors=$(canonical_predecessor_abi_ids "${lock_file}") ||
     die "cannot read the predecessor identities from ${lock_file}"
 
-  local target source expected existing status identity held_by probe_status decision
-  local conflicts=()
-  while IFS=$'\t' read -r target source identity; do
-    [[ -n ${target} && -n ${source} && -n ${identity} ]] ||
-      die "invalid canonical tag plan line for ${plan}"
+  local target source identity amd64_child arm64_child expected existing status
+  local held_by probe_status content_matches decision
+  local identity_conflict_targets=() collision_targets=() unreachable_targets=()
+  while IFS=$'\t' read -r target source identity amd64_child arm64_child; do
+    [[ -n ${target} && -n ${source} && -n ${identity} && -n ${amd64_child} && -n ${arm64_child} ]] ||
+      die "canonical tag plan line must carry target, source, identity and both child digests: ${plan}"
     expected=${source##*@}
     [[ ${source} =~ @sha256:[0-9a-f]{64}$ ]] ||
       die "source image must be addressed by digest: ${source}"
+    [[ ${amd64_child} =~ ^sha256:[0-9a-f]{64}$ && ${arm64_child} =~ ^sha256:[0-9a-f]{64}$ ]] ||
+      die "canonical tag plan child digests are invalid for ${identity}"
 
+    content_matches=no
     if existing=$(image_reference_digest "${target}"); then
-      if [[ ${existing} == "${expected}" ]]; then
-        probe_status=occupied held_by=${abi_id}
+      if [[ ${existing} == "${expected}" ]] ||
+        canonical_index_holds_children "${target}" "${amd64_child}" "${arm64_child}"; then
+        probe_status=occupied held_by=${abi_id} content_matches=yes
       else
         # The digest differs, so the question is whose it is. That answer lives in the index
         # annotation publication writes, not in the digest.
+        # A child comparison that cannot be made is not a difference: the probe below is what
+        # distinguishes a registry that refused to answer from a tag holding other bytes.
         IFS=$'\t' read -r probe_status held_by < <(canonical_tag_probe "${target}") ||
           die "canonical tag probe returned no verdict for ${target}"
       fi
@@ -690,21 +742,39 @@ require_immutable_tags_publishable() {
     fi
 
     decision=$(canonical_tag_publish_decision "${probe_status}" "${held_by}" \
-      "${existing:-}" "${expected}" "${abi_id}" "${predecessors}")
+      "${content_matches}" "${abi_id}" "${predecessors}")
     case ${decision} in
       publish|noop|superseded)
         printf '%s\t%s\n' "${identity}" "${decision}"
         ;;
-      *)
-        conflicts+=("${identity}: ${target} holds ${existing:-nothing readable} (${decision})")
-        ;;
+      identity-conflict) identity_conflict_targets+=("${identity} at ${target}") ;;
+      collision) collision_targets+=("${identity} at ${target} is held by ${held_by:-an unreadable identity}") ;;
+      unreachable) unreachable_targets+=("${identity} at ${target}") ;;
+      *) die "unexpected canonical tag publish decision for ${target}: ${decision}" ;;
     esac
   done <"${plan}"
 
-  (( ${#conflicts[@]} == 0 )) ||
-    die "no tag written; canonical tags already published for a build this lock cannot supersede: $(
-      printf '%s; ' "${conflicts[@]}"
-    ) advance abi.rulego_server.release_version before publishing this build"
+  # One message per cause. A single remedy line for three unrelated causes sends the reader to the
+  # wrong place: `advance release_version` can open a runtime name that a later contract holds, but
+  # it cannot make two different byte sets share one identity-named tag, and it has nothing to do
+  # with a registry that did not answer. The old text was measured doing exactly that -- it named
+  # the upstream release as the fix for a defect in this repository's own byte recipe.
+  (( ${#identity_conflict_targets[@]} + ${#collision_targets[@]} + ${#unreachable_targets[@]} == 0 )) && return
+  local reasons=()
+  (( ${#identity_conflict_targets[@]} == 0 )) ||
+    reasons+=("identity-conflict: $(printf '%s; ' "${identity_conflict_targets[@]}") already hold a build of \
+this contract with different bytes. Only two answers are honest: record the change in the identity \
+closure so this contract gets its own new name, or leave that name to the bytes it already holds. \
+Advancing release_version does not help, because this name is computed from the contract, not from \
+the release version.")
+  (( ${#collision_targets[@]} == 0 )) ||
+    reasons+=("collision: $(printf '%s; ' "${collision_targets[@]}"). If that identity is an earlier \
+contract this lock supersedes, add it to plugin-abi-history.json with a reason and the name becomes a \
+skip; otherwise a release nobody accounts for is published under this name and must not be displaced.")
+  (( ${#unreachable_targets[@]} == 0 )) ||
+    reasons+=("unreachable: $(printf '%s; ' "${unreachable_targets[@]}") could not be read from the \
+registry. That is not the same as the name being free; re-run once the registry answers.")
+  die "no tag written; $(printf '%s ' "${reasons[@]}")"
 }
 
 # Turns the gate's `<identity>\t<decision>` lines into the runtime hosts this release must leave

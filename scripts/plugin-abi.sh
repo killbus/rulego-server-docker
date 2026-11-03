@@ -62,7 +62,7 @@ validate_lock() {
     .schema_version == 1 and
     (.abi_id | test("^abi-[0-9a-f]{64}$")) and
     no_placeholder and
-    (.abi | exact_keys(["go", "native", "rulego_server", "rulego_core", "module_graph", "build"])) and
+    (.abi | exact_keys(["go", "native", "rulego_server", "rulego_core", "module_graph", "build", "packaging"])) and
     (.abi.go | exact_keys(["version", "compiler", "cgo_enabled", "goos", "targets", "experiments", "environment"])) and
     (.abi.go.version | test("^[0-9]+\\.[0-9]+\\.[0-9]+$")) and
     .abi.go.compiler == "gc" and .abi.go.cgo_enabled == true and .abi.go.goos == "linux" and
@@ -101,6 +101,16 @@ validate_lock() {
     (.abi.module_graph | exact_keys(["list_sha256", "graph_sha256", "replacements"])) and
     (.abi.module_graph.list_sha256 | sha256) and (.abi.module_graph.graph_sha256 | sha256) and
     .abi.module_graph.replacements == [] and
+    # The packaging generation versions the recipe, and it belongs to the identity domain because the
+    # recipe decides the artifact bytes: the two Dockerfiles, the flags they pass, the path the ABI
+    # manifest is written to. Go describes the plugin ABI as a function of the toolchain, build tags,
+    # flags and environment, and the source of public dependencies; this field is the remaining term
+    # of that list. Bump it whenever a change would alter published bytes without altering any other
+    # field here, so the new bytes arrive under a name nobody has spent. Leaving it alone while the
+    # recipe changed is what lets one immutable tag hold two different artifacts, and turns a release
+    # into a question only an upstream version can answer.
+    (.abi.packaging | exact_keys(["version"])) and
+    (.abi.packaging.version | test("^[1-9][0-9]*$")) and
     (.abi.build | exact_keys(["host_mode", "plugin_mode", "hosts", "host_flags", "plugin_flags", "host_ldflags", "plugin_ldflags", "host_workspace", "plugin_workspace", "plugin_symbol"])) and
     .abi.build.host_mode == "exe" and .abi.build.plugin_mode == "plugin" and
     (.abi.build.hosts | length >= 1) and
@@ -318,7 +328,16 @@ render_metadata() {
       "io.rulego.go.version": .abi.go.version,
       "io.rulego.libc.family": .abi.native.libc,
       "io.rulego.libc.minimum": .abi.native.minimum_version,
-      "org.opencontainers.image.version": (if $variant == "plugin-sdk" then .abi_id else .abi.rulego_server.release_version + $host.tag_suffix end)
+      "org.opencontainers.image.version": (if $variant == "plugin-sdk" then .abi_id else .abi.rulego_server.release_version + $host.tag_suffix end),
+      # The three OCI-standard annotations describe the source these bytes were compiled from, which
+      # is the upstream revision the lock records, not the commit of this packaging repository that
+      # ran the build. A per-commit value in the image config moves the child digest on every build,
+      # so republishing an unchanged contract never compares equal and every rerun reads as a
+      # conflict. Which commit packaged a release is recorded three times outside the bytes: the
+      # staging tag name, the release record, and the SLSA attestation.
+      "org.opencontainers.image.source": .abi.rulego_server.repository,
+      "org.opencontainers.image.revision": .abi.rulego_server.revision,
+      "org.opencontainers.image.licenses": "Apache-2.0"
     } + if $variant == "plugin-runtime" then {
       "io.rulego.abi.host": $host.id
     } else {
