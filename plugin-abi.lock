@@ -8,8 +8,24 @@
       "cgo_enabled": true,
       "goos": "linux",
       "targets": [
-        {"platform": "linux/amd64", "goarch": "amd64", "tuning": {"GOAMD64": "v1"}, "cc": "gcc", "cxx": "g++"},
-        {"platform": "linux/arm64", "goarch": "arm64", "tuning": {"GOARM64": "v8.0"}, "cc": "gcc", "cxx": "g++"}
+        {
+          "platform": "linux/amd64",
+          "goarch": "amd64",
+          "tuning": {
+            "GOAMD64": "v1"
+          },
+          "cc": "gcc",
+          "cxx": "g++"
+        },
+        {
+          "platform": "linux/arm64",
+          "goarch": "arm64",
+          "tuning": {
+            "GOARM64": "v8.0"
+          },
+          "cc": "gcc",
+          "cxx": "g++"
+        }
       ],
       "experiments": [],
       "environment": {
@@ -29,8 +45,22 @@
       "sdk_base": "docker.io/library/golang:1.25.0-bookworm@sha256:81dc45d05a7444ead8c92a389621fafabc8e40f8fd1a19d7e5df14e61e98bc1a",
       "runtime_base": "gcr.io/distroless/base-debian12:nonroot@sha256:7f0c72cd138b442ae0deeb69c08b1acf5525439ba251a49ad93c320a061567e5",
       "toolchains": [
-        {"goarch": "amd64", "cc": "gcc", "cc_version": "12.2.0", "linker_command": "ld", "linker": "GNU ld", "linker_version": "2.40"},
-        {"goarch": "arm64", "cc": "gcc", "cc_version": "12.2.0", "linker_command": "ld", "linker": "GNU ld", "linker_version": "2.40"}
+        {
+          "goarch": "amd64",
+          "cc": "gcc",
+          "cc_version": "12.2.0",
+          "linker_command": "ld",
+          "linker": "GNU ld",
+          "linker_version": "2.40"
+        },
+        {
+          "goarch": "arm64",
+          "cc": "gcc",
+          "cc_version": "12.2.0",
+          "linker_command": "ld",
+          "linker": "GNU ld",
+          "linker_version": "2.40"
+        }
       ]
     },
     "rulego_server": {
@@ -55,18 +85,35 @@
       "host_mode": "exe",
       "plugin_mode": "plugin",
       "hosts": [
-        {"id": "plugin", "tags": [], "tag_suffix": "-plugin"},
-        {"id": "ai-plugin", "tags": ["with_ai"], "tag_suffix": "-ai-plugin"}
+        {
+          "id": "plugin",
+          "tags": [],
+          "tag_suffix": "-plugin"
+        },
+        {
+          "id": "ai-plugin",
+          "tags": [
+            "with_ai"
+          ],
+          "tag_suffix": "-ai-plugin"
+        }
       ],
-      "host_flags": ["-trimpath"],
-      "plugin_flags": ["-trimpath", "-buildvcs=false"],
+      "host_flags": [
+        "-trimpath"
+      ],
+      "plugin_flags": [
+        "-trimpath",
+        "-buildvcs=false"
+      ],
       "host_ldflags": [],
       "plugin_ldflags": [],
       "host_workspace": "off",
       "plugin_workspace": "generated-server-and-plugin",
       "plugin_symbol": "Plugins"
     },
-    "packaging": {"version": "3"}
+    "packaging": {
+      "version": "3"
+    }
   },
   "compatibility": {
     "previous_sdk": {
@@ -85,7 +132,12 @@
     "runtime_image": "rulego-server",
     "manifest_path": "/usr/share/rulego/plugin-abi.json",
     "reproducible_epoch": 1700000000,
-    "ci": {"runners": {"amd64": "ubuntu-24.04", "arm64": "ubuntu-24.04-arm"}},
+    "ci": {
+      "runners": {
+        "amd64": "ubuntu-24.04",
+        "arm64": "ubuntu-24.04-arm"
+      }
+    },
     "editor_payload": {
       "repository": "https://github.com/rulego/rulego",
       "version": "v1.0.0",
@@ -96,17 +148,35 @@
     },
     "size_limits": {
       "amd64": {
-        "sdk": {"compressed": 1500000000, "uncompressed": 3800000000},
+        "sdk": {
+          "compressed": 1500000000,
+          "uncompressed": 3800000000
+        },
         "runtime": {
-          "plugin": {"compressed": 35000000, "uncompressed": 80000000},
-          "ai-plugin": {"compressed": 50000000, "uncompressed": 120000000}
+          "plugin": {
+            "compressed": 35000000,
+            "uncompressed": 80000000
+          },
+          "ai-plugin": {
+            "compressed": 50000000,
+            "uncompressed": 120000000
+          }
         }
       },
       "arm64": {
-        "sdk": {"compressed": 1500000000, "uncompressed": 3800000000},
+        "sdk": {
+          "compressed": 1500000000,
+          "uncompressed": 3800000000
+        },
         "runtime": {
-          "plugin": {"compressed": 35000000, "uncompressed": 90000000},
-          "ai-plugin": {"compressed": 50000000, "uncompressed": 120000000}
+          "plugin": {
+            "compressed": 35000000,
+            "uncompressed": 90000000
+          },
+          "ai-plugin": {
+            "compressed": 50000000,
+            "uncompressed": 120000000
+          }
         }
       }
     }

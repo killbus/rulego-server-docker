@@ -21,6 +21,19 @@ expect_failure() {
 
 scripts/plugin-abi.sh validate --candidate
 
+# The file's layout is the output of `jq .`, not a hand-tuned arrangement, and nothing but this check keeps
+# it that way. Before this assertion the lock carried 16 compact single-line objects spread over four commits
+# -- each editor wrote its own addition in whatever style its tool produced and left its neighbours alone --
+# so the first mechanical rewrite of the file moved 102 lines and a rotation done by the documented recipe
+# looked like a reformat. Layout carries no contract (every digest here is taken from `jq -S -c` bytes), which
+# is exactly why it needed an owner rather than four: with one, the diff of a rotation shows only the values
+# that changed, which is the whole reason a rotation is reviewed at all.
+if ! cmp -s <(jq . plugin-abi.lock) plugin-abi.lock; then
+  echo 'plugin-abi.lock is not the layout `jq .` prints; reformat it with `jq . plugin-abi.lock`' >&2
+  diff -u plugin-abi.lock <(jq . plugin-abi.lock) | head -20 >&2
+  exit 1
+fi
+
 abi_id=$(scripts/plugin-abi.sh render id)
 [[ ${abi_id} =~ ^abi-[0-9a-f]{64}$ ]]
 jq -e '.include | map(.platform) == ["linux/amd64", "linux/arm64"]' \

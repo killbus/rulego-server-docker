@@ -383,6 +383,14 @@ column and the embedded-document column are what those vectors exist to protect,
 leaves the contract alone has to leave both of them exactly as they are -- if either moves, this is a
 contract change to review, not a value to re-stamp.
 
+The lock's own layout is the output of `jq .` and nothing else, which is why the recipe above can rewrite the
+whole file with `jq` and still be a rotation: `tests/plugin-abi-lock.sh` refuses a lock whose bytes are not
+what `jq .` prints. That assertion exists because the file arrived by hand, in four pieces, and each piece
+kept the layout its author's tool produced -- 16 compact single-line objects among 98 lines of `jq` output,
+with no check able to see the difference because every digest here is taken from `jq -S -c` bytes. Layout
+carries no contract, so leaving it unowned cost a rotation's reviewability: the documented recipe moved 102
+lines that had nothing to do with the record being rotated.
+
 Run the local static and failure-injection gates with:
 
 ```bash
