@@ -167,29 +167,40 @@ if [[ $(grep -Fc 'PLUGIN_ABI_BACKFILL_APPLY' "${backfill_workflow}") != 1 ]]; th
   exit 1
 fi
 
-# Both of these jobs grade a plan by asking whether the revision it cites is a commit of the checkout,
-# which a depth-one checkout answers no to even when the plan is correct. The checkout depth is
-# therefore part of what those jobs can prove, and it belongs to exactly the jobs that need it: no other
-# Plugin ABI job resolves a cited commit, so none should ask for history it does not use.
+# Three jobs ask whether a revision someone cited is a commit of this checkout, which a depth-one checkout
+# answers no to even when the answer should be yes: the offline suite grades the committed backfill plan,
+# the backfill job grades its own plan, and the compatibility check dates every published SDK generation by
+# the commit its image names. The checkout depth is therefore part of what those jobs can prove, and it
+# belongs to exactly the jobs that need it: no other Plugin ABI job resolves a cited commit, so none should
+# ask for history it does not use.
 assert_contains "${verify_workflow}" 'fetch-depth: 0'
 assert_contains "${backfill_workflow}" 'fetch-depth: 0'
-if [[ $(grep -cF 'fetch-depth: 0' "${verify_workflow}") != 1 ]]; then
-  echo 'the offline job must check out with history, and no other job there should ask for it' >&2
-  exit 1
-fi
 if [[ $(grep -cF 'fetch-depth: 0' "${backfill_workflow}") != 1 ]]; then
   echo 'the backfill job must check out with the history its plan gate needs' >&2
   exit 1
 fi
-# The one depth line in the verification workflow has to be the offline job's own checkout, so that
-# adding depth somewhere else cannot silently stand in for the job that needs it.
-offline_job_line=$(grep -Fn '  offline:' "${verify_workflow}" | cut -d: -f1)
-offline_run_line=$(grep -Fn 'run: tests/run.sh' "${verify_workflow}" | cut -d: -f1)
-offline_depth_line=$(grep -Fn 'fetch-depth: 0' "${verify_workflow}" | cut -d: -f1)
-(( offline_depth_line > offline_job_line && offline_depth_line < offline_run_line )) || {
-  echo 'the offline job checks out without the history its plan gate needs' >&2
+if [[ $(grep -cF 'fetch-depth: 0' "${verify_workflow}") != 2 ]]; then
+  echo 'exactly the two jobs that resolve cited commits may ask for history in the verification workflow' >&2
   exit 1
-}
+fi
+# Each depth line has to sit inside the job that needs it, so that a depth asked for somewhere else cannot
+# silently stand in for the checkout that does -- and so that a job reading no commits cannot accumulate
+# history it would never use. Each pair names a job and the step whose answer depends on that history.
+mapfile -t verify_depth_lines < <(grep -Fn 'fetch-depth: 0' "${verify_workflow}" | cut -d: -f1)
+for job_step in "offline|run: tests/run.sh" "allocatability|run: scripts/derive-compatibility-sdk.sh check"; do
+  job=${job_step%%|*}
+  step=${job_step#*|}
+  job_line=$(grep -Fn "  ${job}:" "${verify_workflow}" | cut -d: -f1)
+  step_line=$(grep -Fn "${step}" "${verify_workflow}" | cut -d: -f1)
+  depth_under_job=0
+  for depth_line in "${verify_depth_lines[@]}"; do
+    (( depth_line > job_line && depth_line < step_line )) && depth_under_job=$((depth_under_job + 1))
+  done
+  (( depth_under_job == 1 )) || {
+    printf 'the %s job checks out without the history its cited commits need\n' "${job}" >&2
+    exit 1
+  }
+done
 
 while IFS= read -r action_reference; do
   revision=${action_reference##*@}

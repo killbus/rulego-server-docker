@@ -25,6 +25,9 @@ moved_digest=sha256:$(printf 'd%.0s' {1..64})
 amd64_child=sha256:$(printf 'b%.0s' {1..64})
 arm64_child=sha256:$(printf 'c%.0s' {1..64})
 attestation=sha256:$(printf '0%.0s' {1..64})
+# The image config of the linux/amd64 child. The helper reads the packaging revision out of it, so the
+# mock has to answer for that reference too, not only for the tag and the index.
+config_digest=sha256:$(printf '9%.0s' {1..64})
 
 # The revision stands for an earlier release: the same contract shape, one different packaging
 # generation, therefore a different identity. It cannot be HEAD, because a lock may not record itself
@@ -35,7 +38,11 @@ previous_abi_id=$(jq -S -c '.abi | .packaging.version = "9"' <<<"${work_lock}" |
 jq -S --arg abi_id "${previous_abi_id}" '.abi.packaging.version = "9" | .abi_id = $abi_id' \
   <<<"${work_lock}" >"${test_root}/repo/plugin-abi.lock"
 sdk_image=$(jq -er '.release.sdk_image' "${test_root}/repo/plugin-abi.lock")
-reference_file() { printf '%s' "${MOCK_REGISTRY_DIR}/${sdk_image}:${previous_abi_id}" | tr ':@' '__'; }
+# One mock file per reference. The registry stand-in keys on the last path component with `:` and `@`
+# turned into `_`, so every writer here has to use the same transform: a tag, an index read by digest
+# and an image config are three different references that all live in this one directory.
+ref_file() { printf '%s/%s' "${MOCK_REGISTRY_DIR}" "$(printf '%s' "$1" | tr ':@' '__')"; }
+reference_file() { ref_file "${sdk_image}:${previous_abi_id}"; }
 
 git_in_repo() {
   (cd "${test_root}/repo" && git -c user.name=derive-test -c user.email=derive-test@example.invalid "$@")
@@ -44,6 +51,12 @@ git_in_repo init -q
 git_in_repo commit -q --allow-empty -m seeded-before-the-contract
 git_in_repo add plugin-abi.lock
 git_in_repo commit -q -m previous-contract
+previous_commit=$(git_in_repo rev-parse HEAD)
+
+# The commit named by an image that this release does not follow. It exists in the synthetic history, so
+# a helper that only asked "is this a commit?" would accept it; the claim under test is that the tag
+# asked about was not built from it.
+other_commit=$(git_in_repo rev-parse HEAD~1)
 
 # A registry stand-in for `docker buildx imagetools inspect`: every reference resolves through a file,
 # and MOCK_SEQUENTIAL names a call log so a later read can answer differently from the first. That
@@ -78,21 +91,65 @@ STUB
 chmod +x "${test_root}/bin/docker"
 export MOCK_REGISTRY_DIR=${test_root}/registry
 export PATH=${test_root}/bin:${PATH}
+
+# A registry stand-in for the HTTP half of the same promise. Publication order is observable only
+# through the tag list, so a helper that cannot list tags cannot say "this is the newest published
+# generation" -- and must not get to say it. This one answers the anonymous pull token and one
+# repository's tags, and treats anything else as a failed request rather than an empty answer, because
+# an empty list is how a missing generation would be mistaken for a released one.
+cat >"${test_root}/bin/curl" <<'STUB'
+#!/usr/bin/env bash
+set -Eeuo pipefail
+url=${*: -1}
+if [[ ${url} == *"ghcr.io/token?"* ]]; then
+  printf '{"token":"mock-token"}\n'
+  exit 0
+fi
+if [[ ${url} == */tags/list* ]]; then
+  if [[ -n ${MOCK_TAG_LIST:-} && -f ${MOCK_TAG_LIST} ]]; then
+    jq -cn --slurpfile all "${MOCK_TAG_LIST}" '{tags: $all[0]}'
+    exit 0
+  fi
+  printf 'no such repository\n' >&2
+  exit 22
+fi
+printf 'unexpected curl call: %s\n' "${url}" >&2
+exit 22
+STUB
+chmod +x "${test_root}/bin/curl"
+export MOCK_TAG_LIST=${test_root}/tags.json
+# One generation is published in this mock: the one the record points at. `latest` is there because the
+# real repository has non-canonical names, and a generation list that took every tag for a release would
+# have to die dating one that never was an SDK contract.
+jq -cn --arg abi "${previous_abi_id}" '["latest", $abi]' >"${MOCK_TAG_LIST}"
 export GITHUB_REPOSITORY_OWNER=killbus
 # A registry that will not answer must be reported after one read, not after the release pipeline's
 # eight-attempt backoff.
 export REGISTRY_RETRY_ATTEMPTS=1 REGISTRY_RETRY_INITIAL_DELAY=1 REGISTRY_RETRY_MAX_DELAY=1
 
-# register <index-digest> <amd64> <arm64> -- writes what the published index holds. The attestation
-# member is included because a real multi-architecture index always carries one, and a helper that
-# counted it as a platform image would report a third child nobody can pull.
+# register <revision> -- publishes the mock generation: the index under its canonical name, the same
+# index reachable by digest, the amd64 child's config pointer, and that config naming the commit the
+# image was built from. The first two carry the identity as an annotation because that is the only place
+# a published name can be checked against what it holds. The attestation member is included because a
+# real multi-architecture index always carries one, and a helper that counted it as a platform image
+# would report a third child nobody can pull.
 register() {
-  jq -cn --arg digest $1 --arg amd64 $2 --arg arm64 $3 --arg attestation "${attestation}" '
-    {digest: $digest, manifests: [
+  local revision=${1:?the revision named by the published image is required}
+  local arm64=${2:-${arm64_child}}
+
+  jq -cn --arg digest "${index_digest}" --arg amd64 "${amd64_child}" --arg arm64 "${arm64}" \
+    --arg attestation "${attestation}" --arg abi "${previous_abi_id}" '
+    {digest: $digest, annotations: {"io.rulego.abi.id": $abi}, manifests: [
       {platform: {os: "linux", architecture: "amd64"}, digest: $amd64},
       {platform: {os: "linux", architecture: "arm64"}, digest: $arm64},
       {platform: {os: "unknown", architecture: "unknown"}, digest: $attestation,
-       annotations: {"vnd.docker.reference.type": "attestation-manifest"}}]}' >"$(reference_file)"
+       annotations: {"vnd.docker.reference.type": "attestation-manifest"}}]}' |
+    tee "$(reference_file)" >"$(ref_file "${sdk_image}@${index_digest}")"
+  jq -cn --arg digest "${config_digest}" '{config: {digest: $digest}}' \
+    >"$(ref_file "${sdk_image}@${amd64_child}")"
+  jq -cn --arg revision "${revision}" \
+    '{config: {Labels: {"org.opencontainers.image.revision": $revision}}}' \
+    >"$(ref_file "${sdk_image}@${config_digest}")"
 }
 
 derive() { (cd "${test_root}/repo" && "${repository_root}/scripts/derive-compatibility-sdk.sh" derive "$@"); }
@@ -135,7 +192,7 @@ refusal() {
 
 # The happy path, asserted field by field against what the mock registry holds. No expected digest is
 # typed into this file, which is the point of the thing under test.
-register "${index_digest}" "${amd64_child}" "${arm64_child}"
+register "${previous_commit}"
 derived=$(derive HEAD) || {
   echo 'the helper could not derive a block from a published tag' >&2
   exit 1
@@ -159,18 +216,19 @@ PLUGIN_ABI_LOCK=${test_root}/stamped.lock scripts/plugin-abi.sh validate --candi
 
 # One digest for both architectures is a mislabelled index: the probe would compare one image with
 # itself and still call the outcome a compatibility result.
-register "${index_digest}" "${amd64_child}" "${amd64_child}"
+register "${previous_commit}" "${amd64_child}"
 refusal 'both architectures sharing one digest' 'mislabelled index' derive HEAD
 
 # A missing platform is not a partial answer to paste now and repair after a red release.
-jq -cn --arg digest "${index_digest}" --arg arm64 "${arm64_child}" '
-  {digest: $digest, manifests: [{platform: {os: "linux", architecture: "arm64"}, digest: $arm64}]}' \
+jq -cn --arg digest "${index_digest}" --arg arm64 "${arm64_child}" --arg abi "${previous_abi_id}" '
+  {digest: $digest, annotations: {"io.rulego.abi.id": $abi},
+   manifests: [{platform: {os: "linux", architecture: "arm64"}, digest: $arm64}]}' \
   >"$(reference_file)"
 refusal 'an index without linux/amd64' 'does not hold exactly one linux/amd64' derive HEAD
 
 # A revision that was never published cannot be previous to anything, and that has to be said out loud
 # rather than answered with a block of placeholders.
-register "${index_digest}" "${amd64_child}" "${arm64_child}"
+register "${previous_commit}"
 mv "$(reference_file)" "${test_root}/stored"
 refusal 'a canonical tag that is not published' 'no published SDK tag to derive' derive HEAD
 mv "${test_root}/stored" "$(reference_file)"
@@ -232,18 +290,46 @@ mv "${test_root}/stored" "$(reference_file)"
 refusal 'a tag that moved between the two reads of a check' 'not the digest the tag resolves to' \
   check_two_reads "${record_lock}"
 
-# The identity comes from the lock at that revision, never from the caller, so a revision whose lock
-# is not a legal contract has nothing to derive. Two shapes: no lock at all, and a lock whose recorded
-# identity does not match its own bytes.
+# The identity comes from the lock at that revision, never from a recomputation here. Recomputing is the
+# thing that broke: the identity function's domain changed once, so today's function hashes an older
+# contract into a name that generation was never published under, and demanding that it validate against
+# today's schema refuses every real predecessor. What remains has to be checked claim by claim, so a lock
+# that records no usable identity leaves nothing to check.
 git_in_repo rm -q plugin-abi.lock
 git_in_repo commit -q -m a-revision-with-no-contract
 refusal 'a revision with no lock' 'no plugin-abi.lock' derive HEAD
 
-git_in_repo show 'HEAD~1:plugin-abi.lock' >"${test_root}/restored.lock"
-jq '.abi_id = ("abi-" + ("f" * 64))' "${test_root}/restored.lock" >"${test_root}/stale.lock"
-mv "${test_root}/stale.lock" "${test_root}/repo/plugin-abi.lock"
+git_in_repo show "${previous_commit}:plugin-abi.lock" >"${test_root}/restored.lock"
+jq 'del(.abi_id)' "${test_root}/restored.lock" >"${test_root}/repo/plugin-abi.lock"
 git_in_repo add plugin-abi.lock
-git_in_repo commit -q -m a-revision-with-a-stale-identity
-refusal 'a revision whose lock is not a contract' 'not a valid Plugin ABI contract' derive HEAD
+git_in_repo commit -q -m a-revision-recording-no-identity
+refusal 'a lock that records no identity' 'records no identity' derive HEAD
+
+jq '.abi_id = "abi-not-a-digest"' "${test_root}/restored.lock" >"${test_root}/repo/plugin-abi.lock"
+git_in_repo add plugin-abi.lock
+git_in_repo commit -q -m a-revision-recording-an-ill-formed-identity
+refusal 'a lock recording an identity that is not a digest' 'not an ABI digest' derive HEAD
+
+# The published index annotates an identity other than the tag being derived. A name can be repointed at
+# bytes that answer to another contract, and only the content says so: the lock at the revision would keep
+# describing the generation the name used to hold.
+jq -cn --arg digest "${index_digest}" --arg amd64 "${amd64_child}" --arg arm64 "${arm64_child}" \
+  --arg attestation "${attestation}" --arg abi "abi-$(printf '1%.0s' {1..64})" '
+  {digest: $digest, annotations: {"io.rulego.abi.id": $abi}, manifests: [
+    {platform: {os: "linux", architecture: "amd64"}, digest: $amd64},
+    {platform: {os: "linux", architecture: "arm64"}, digest: $arm64},
+    {platform: {os: "unknown", architecture: "unknown"}, digest: $attestation,
+     annotations: {"vnd.docker.reference.type": "attestation-manifest"}}]}' >"$(reference_file)"
+refusal 'an index annotating an identity other than the tag' 'annotates an identity other than' \
+  derive "${previous_commit}"
+
+# The three claims below agree on the tag, the annotation and the two architectures, and the image still
+# names a commit other than the revision asked about. That generation is not the one this release follows,
+# and a record made from it would send the compatibility probe to a predecessor chosen by name alone.
+register "${previous_commit}"
+jq -cn --arg revision "${other_commit}" \
+  '{config: {Labels: {"org.opencontainers.image.revision": $revision}}}' \
+  >"$(ref_file "${sdk_image}@${config_digest}")"
+refusal 'a published image built from another commit' 'was built from' derive "${previous_commit}"
 
 echo 'Compatibility SDK rotation derives from the registry and refuses to invent one'

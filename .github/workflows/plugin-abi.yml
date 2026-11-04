@@ -40,6 +40,11 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
+          # The compatibility check below dates every published SDK generation by the commit its own image
+          # names, and a commit that is not in the checkout is a refusal, not a skip. A depth-one checkout
+          # would answer "not in this checkout" for every one of them, so the pull request that rotates the
+          # record could never be graded on the record it rotates.
+          fetch-depth: 0
       # Reads public manifests only, anonymously, and writes nothing: no packages token is needed
       # and none is given. A name that has been occupied by a contract the lock does not account
       # for fails here, on the pull request that introduces it, rather than at the publish that
@@ -63,6 +68,9 @@ jobs:
       # mistyped one passes every repository check and surfaces only when a release pulls the
       # previous SDK image by digest. This resolves the recorded tag anonymously and compares the
       # index and both architecture images with what the lock claims; it writes nothing.
+      # The same step then asks which generation is the newest published one and refuses a record that
+      # names anything else, because a rotation that was simply forgotten leaves every digest in the
+      # record correct: only the order can tell a current predecessor from the release before last.
       - name: Check the recorded compatibility SDK against the registry
         run: scripts/derive-compatibility-sdk.sh check
 

@@ -71,16 +71,22 @@ grep -Fxq 'HOST_TAGS=with_ai' <(scripts/plugin-abi.sh render sdk-env amd64 ai-pl
 jq -e '."io.rulego.abi.host" == "ai-plugin" and
   ."org.opencontainers.image.version" == "v1.0.0-ai-plugin"' \
   <<<"$(scripts/plugin-abi.sh render metadata plugin-runtime amd64 ai-plugin)" >/dev/null
-jq -e '
-  .abi_id == "abi-3e0c9d46dddaf6235cfe609d543222f07f8e1abf3374f0669bf703df85063885" and
-  .index_digest == "sha256:c5fadb574a1171854eead3a9f94484e1470aba5496d51c2751a6313d7f2b8d01" and
-  .child_digest == "sha256:91341e7fd32c080d7d05561b554a1b556512fe2518ec85f402800550584f652d" and
-  .reference == "ghcr.io/killbus/rulego-plugin-sdk@sha256:91341e7fd32c080d7d05561b554a1b556512fe2518ec85f402800550584f652d"
-' <<<"$(scripts/plugin-abi.sh render compatibility-sdk amd64)" >/dev/null
-jq -e '
-  .child_digest == "sha256:ba8b23897e5a0dcb01c7ed88dc4c113c9e1e1aa03d0cf53695ee0fb9a7a71192" and
-  .reference == "ghcr.io/killbus/rulego-plugin-sdk@sha256:ba8b23897e5a0dcb01c7ed88dc4c113c9e1e1aa03d0cf53695ee0fb9a7a71192"
-' <<<"$(scripts/plugin-abi.sh render compatibility-sdk arm64)" >/dev/null
+# The compatibility render is graded against whatever record the lock carries, not against digests copied
+# into this file. The record now rotates on its own, so a test that pinned its bytes would go red on every
+# honest rotation -- which is the same hand-transcription the rotation gate exists to remove, relocated into
+# the suite. What stays pinned here is the projection: which fields the render takes, and how it composes
+# the reference for the architecture it was asked about.
+jq -e --arg repository "$(jq -er '.compatibility.previous_sdk.repository' plugin-abi.lock)" \
+  --arg abi "$(jq -er '.compatibility.previous_sdk.abi_id' plugin-abi.lock)" \
+  --arg index "$(jq -er '.compatibility.previous_sdk.index_digest' plugin-abi.lock)" \
+  --arg amd64 "$(jq -er '.compatibility.previous_sdk.children.amd64' plugin-abi.lock)" '
+  .abi_id == $abi and .index_digest == $index and .child_digest == $amd64 and
+  .reference == ($repository + "@" + $amd64)' \
+  <<<"$(scripts/plugin-abi.sh render compatibility-sdk amd64)" >/dev/null
+jq -e --arg repository "$(jq -er '.compatibility.previous_sdk.repository' plugin-abi.lock)" \
+  --arg arm64 "$(jq -er '.compatibility.previous_sdk.children.arm64' plugin-abi.lock)" '
+  .child_digest == $arm64 and .reference == ($repository + "@" + $arm64)' \
+  <<<"$(scripts/plugin-abi.sh render compatibility-sdk arm64)" >/dev/null
 
 mutate_and_fail() {
   local description=$1
@@ -112,7 +118,8 @@ mutate_and_fail 'compatibility ABI equals current ABI' '.compatibility.previous_
 mutate_and_fail 'invalid compatibility index digest' '.compatibility.previous_sdk.index_digest = "sha256:invalid"'
 mutate_and_fail 'invalid compatibility child digest' '.compatibility.previous_sdk.children.amd64 = "sha256:invalid"'
 mutate_and_fail 'compatibility repository contains tag' '.compatibility.previous_sdk.repository = "ghcr.io/killbus/rulego-plugin-sdk:latest"'
-mutate_and_fail 'compatibility repository contains digest' '.compatibility.previous_sdk.repository = "ghcr.io/killbus/rulego-plugin-sdk@sha256:91341e7fd32c080d7d05561b554a1b556512fe2518ec85f402800550584f652d"'
+mutate_and_fail 'compatibility repository contains digest' \
+  '.compatibility.previous_sdk.repository += "@" + .compatibility.previous_sdk.children.amd64'
 mutate_and_fail 'missing host size limit' 'del(.release.size_limits.amd64.runtime["ai-plugin"])'
 mutate_and_fail 'unknown host size limit' '.release.size_limits.amd64.runtime.extra = {"compressed": null, "uncompressed": null}'
 mutate_and_fail 'duplicate target' '.abi.go.targets[1] = .abi.go.targets[0]'

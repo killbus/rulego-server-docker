@@ -69,7 +69,7 @@ domain=tests/fixtures/plugin-abi-identity/domain.canonical
 # image, retargeting a runner or filling a ceiling is not something this file can be talked
 # into accepting: the bytes below are the contract.
 abi_id_v0=abi-af0e7765afa339934f9a8bc41b71bbe45176c48f173f5909732867c48fbd6bee
-lock_digest_v0=sha256:6fe67dfa5c99795c369e269ca74b73f34b0048344fad932c4feb768d7c5536b8
+lock_digest_v0=sha256:b730e945ede0e1a6eeb16cae274a0eb11b5ee0bab94a21c4df4758d204ffaefd
 manifest_digest_v0=sha256:94228ff6c6e3059a692fc186d5d695cf824c3f9c10d0d3a771343764fb6268a1
 
 [[ $(abi_of_lock_segment plugin-abi.lock) == "${abi_id_v0}" ]] ||
@@ -180,36 +180,36 @@ vector 'release-state-ready' \
      | .release.size_limits.arm64.sdk = '"${all_ceilings}"'
      | .release.size_limits.arm64.runtime.plugin = '"${all_ceilings}"'
      | .release.size_limits.arm64.runtime["ai-plugin"] = '"${all_ceilings}"'' \
-  stable "${abi_id_v0}" sha256:65b2c99655121d1692d6bbd11cae0408ed483636ad885ddc6562177a6940a572
+  stable "${abi_id_v0}" sha256:92b3f94aa609d53240d36a0293d9d4da31591c3c4876d68c37993a35f8115233
 vector 'amd64-runner-label' '.release.ci.runners.amd64 = "ubuntu-24.04-alt"' \
-  stable "${abi_id_v0}" sha256:a9598752caa3b9ef781152fcfd9915b971676a8b8e57bd8e9fafdc86b4625f51
+  stable "${abi_id_v0}" sha256:daa63b075b9d69fc593ea06b90374b997ff0b8c8dc4dff8ee7f85766edfeecfc
 vector 'sdk-repository-name' '.release.sdk_image = "rulego-plugin-sdk-alt"' \
-  stable "${abi_id_v0}" sha256:ab04003ed21a321aacabc3fcddd1423024d915b685ba48cea7f3db1426828b64
+  stable "${abi_id_v0}" sha256:815d4c0088149ac0aabb4f265a0abe48e8eb263f2c60e683672f89d61a670163
 vector 'runtime-repository-name' '.release.runtime_image = "rulego-server-alt"' \
-  stable "${abi_id_v0}" sha256:03f8f366ec59edab7aed00b28c2270e3ea2c500f6e763098e010969df615e341
+  stable "${abi_id_v0}" sha256:1744c319f14d105a086fe22a7a5b7d0cc5cbb3d64fcc649c22a2d14a8d595967
 vector 'embedded-manifest-path' '.release.manifest_path = "/other/plugin-abi.json"' \
-  stable "${abi_id_v0}" sha256:26bd703bebe39b79a94cf0b4cc7fee801946ea4efdd3265a5366bd05db31aabf
+  stable "${abi_id_v0}" sha256:7df4fc4c0678f7284ee3b664ef67d9885cd6419abcecddeb3e3dcb857b9f1f4c
 vector 'reproducible-epoch' '.release.reproducible_epoch = 1700000001' \
-  stable "${abi_id_v0}" sha256:a01ec9da101dc7cbab8f84ec94e359cf394845ef1b60f4dd1ba47cae74d31bc4
+  stable "${abi_id_v0}" sha256:c4b91547d417dfda90936e82c6f215ea164c1236acc53703fc9298bf7e9ab19e
 vector 'editor-asset-digest' \
   '.release.editor_payload.asset.sha256 =
      "0000000000000000000000000000000000000000000000000000000000000001"' \
-  stable "${abi_id_v0}" sha256:3b24cae10a9cee6042abac5bac511e550450564595792ebf233903a7a5d55134
+  stable "${abi_id_v0}" sha256:14b357bdfa545d84524d92de489047705d439ebd09f50936b3763fb2374a8dab
 vector 'previous-sdk-index-digest' \
   '.compatibility.previous_sdk.index_digest =
      "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"' \
-  stable "${abi_id_v0}" sha256:0fa5e1ef5a25fc49f578b9c210929822827a34b3dfa70e91d5bec936bf58b76a
+  stable "${abi_id_v0}" sha256:0c865382fd8fef68fc9b15a50c762a4f85c6ff62c83cb28cb290f2696c19b2f8
 
 # Changes: fields inside the domain. Both the identity and the canonical bytes are frozen, so
 # the direction and the magnitude are each asserted separately.
 vector 'go-version' '.abi.go.version = "1.25.1"' \
   changes abi-a577d039a624a73ade51bd7466f1782b91f05073ab5d26825d2c838fb0cbb5d1 \
-    sha256:db958869d3c0f94157b745077de1a00d416d4a82ea16bf21cea02ea6ca8142b2
+    sha256:e07bddeecbab0ad770899a923ff83f4bafc736de23e101284b404e43f0406b05
 vector 'module-graph-list-digest' \
   '.abi.module_graph.list_sha256 =
      "0000000000000000000000000000000000000000000000000000000000000001"' \
   changes abi-ad0cf58959b60a9589640094cfaedc02d6488340ade20242b076e6d0403d8af8 \
-    sha256:af1a90702f13eec34f9bbc66016cd52c7f0482e0e3c06d805a26a2995f4bbfeb
+    sha256:9b29d7700e85ee2e020af41108509f17c76047d91e23b423bc3e1f63b5ecfb29
 # A new host must carry a ceiling entry because the schema keys ceilings off the host list.
 # Copying the sibling's value instead of writing nulls keeps this vector legal in either
 # release state: null under measurement, positive under ready. Hardcoding null here made it a
@@ -223,10 +223,10 @@ vector 'host-list-grows' \
      | .release.size_limits.arm64.runtime["all-plugin"] =
          .release.size_limits.arm64.runtime.plugin' \
   changes abi-851b2d7c4c718b50c26aebcbfd2121cfcc8da45f986a73bac0996fcaa3113a6e \
-    sha256:24e4087e078d7d78494ab0df189e3c18cb4d866a96cf041dfa06b18169c9b6d0
+    sha256:d9f7adca95f5998109f793198fb61035c26e6d1bb961d1f10030b6a093354c26
 vector 'host-tags-cleared' '.abi.build.hosts[1].tags = []' \
   changes abi-272891d9dbf887f4c67c62e8e403eb293d7e34d3b2fd7741f00c476d664aa345 \
-    sha256:2224d14719aa5f59d86f1e8402a61fb31e277b7c0d945d3599d15893012dc9a4
+    sha256:204b9c1cfc32f3375fb13d432eab6046c47c1dd18bbbb869534d6a61149a55a7
 # The recipe is inside the domain. A packaging generation that moves must move the identity, because
 # that is the mechanism by which new bytes arrive under a name nobody has spent: measured on the live
 # registry, `abi-f972e691` and `abi-78737478` are canonical tags held by artifacts this recipe cannot
@@ -234,7 +234,7 @@ vector 'host-tags-cleared' '.abi.build.hosts[1].tags = []' \
 # release version.
 vector 'packaging-generation' '.abi.packaging.version = "4"' \
   changes abi-c47c1fe983d1bcefeb1bef05f87f72ae12d839c1a976a2732dba581f59da57a2 \
-    sha256:1ad4f0cdedcef2b1a2cbc4f74ca5f1ff9a70e2527a90380dfb94a73ea812a242
+    sha256:954c59b3dd9b22d0a9b67046162df6d6d785708c9ef8420d07a99dc24ecc6801
 
 # The gap this file used to record, and the four ways it is now closed.
 #
