@@ -22,6 +22,11 @@
 #   apply              writes, and only with PLUGIN_ABI_BACKFILL_APPLY=1
 #   derivation-only    validates the plan against this checkout and the naming function alone, with
 #                      no registry call, so the offline suite can grade a committed plan
+#
+# The record says which moment it describes: `read-only` for a run that writes nothing, `pre-write` for
+# the classification an apply run made before attempting anything, `post-write` for the reads taken after
+# the writes. An entry that has not been read says `digest_matches: null` rather than `false`, so a run
+# that dies among its writes leaves a record that cannot accuse a name nobody checked.
 
 set -Eeuo pipefail
 
@@ -144,8 +149,12 @@ for ((index = 0; index < count; index += 1)); do
         '{host:$h, canonical_ref:$c, digest:$d, action:"noop", digest_matches:true}')" )
       ;;
     1)
+      # `null`, not `false`: nothing has read this name back yet, and a record that says false states an
+      # observation that did not happen. This file is replaced below by the post-write record, but a run
+      # that dies in between still uploads it, and then only `null` keeps it from accusing a name that
+      # in fact holds the bytes.
       actions+=( "$(jq -cn --arg h "${host}" --arg c "${planned}" --arg d "${digest}" \
-        '{host:$h, canonical_ref:$c, digest:$d, action:"mint", digest_matches:false}')" )
+        '{host:$h, canonical_ref:$c, digest:$d, action:"mint", digest_matches:null}')" )
       ;;
     *)
       die "entry ${host}: the registry could not answer whether the name exists, and absence is not a default"
@@ -154,9 +163,24 @@ for ((index = 0; index < count; index += 1)); do
 done
 
 mkdir -p "$(dirname -- "${record}")"
-report=$(IFS=,; printf '[%s]' "${actions[*]}")
-jq -n --arg mode "${mode}" --arg plan "${plan##*/}" --argjson entries "${report}" \
-  '{mode:$mode, plan:$plan, entries:$entries}' | jq -S '.' > "${record}"
+# An array of entry objects is built by handing the objects to `jq -s` and letting it parse them, not by
+# joining strings with a separator. A join that yields valid JSON for one entry yields invalid JSON for
+# two, and two is the ordinary number of hosts here -- so the shape of the record has to be something
+# other than luck.
+json_array() {
+  printf '%s\n' "$@" | jq -sc '.'
+}
+
+entries_json=$(json_array "${actions[@]}")
+[[ $(jq 'length' <<<"${entries_json}") == "${count}" ]] \
+  || die 'internal: the record does not hold one entry per plan entry'
+# A record says which moment it describes. `read-only` never writes, so its entries are plain reads;
+# `pre-write` is what an apply run leaves behind if it dies among the writes, and its unread entries say
+# null. Only `post-write` may claim what a name resolves to now.
+if [[ ${mode} == apply ]]; then stage=pre-write; else stage=read-only; fi
+jq -n --arg mode "${mode}" --arg plan "${plan##*/}" --arg stage "${stage}" \
+  --argjson entries "${entries_json}" \
+  '{mode:$mode, plan:$plan, stage:$stage, entries:$entries}' | jq -S '.' > "${record}"
 
 if [[ ${mode} != apply ]]; then
   log "$(jq -r '[.entries[].action] | group_by(.) | map("\(.[0])=\(length)") | join(" ")' "${record}")"
@@ -169,7 +193,10 @@ for entry_json in "${actions[@]}"; do
   target=$(jq -r '.canonical_ref' <<<"${entry_json}")
   digest=$(jq -r '.digest' <<<"${entry_json}")
   log "entry ${host}: minting ${target##*:}"
-  docker buildx imagetools create --tag "${target}" "${target%:*}@${digest}"
+  # A refused write names the entry it refused, because the run stops here and the record left behind is
+  # the one written before anything was attempted.
+  docker buildx imagetools create --tag "${target}" "${target%:*}@${digest}" \
+    || die "entry ${host}: the registry refused the write for ${target##*:}"
   now=$(image_reference_digest "${target}") || die "entry ${host}: written and unreadable"
   [[ ${now} == "${digest}" ]] || die "entry ${host}: the new name resolves to other bytes"
 done
@@ -191,10 +218,18 @@ for entry_json in "${actions[@]}"; do
   results+=( "$(jq -cn --arg h "${host}" --arg c "${target}" --arg d "${digest}" --argjson m "${matches}" \
     '{host:$h, canonical_ref:$c, digest:$d, digest_matches:$m}')" )
 done
-merged=$(jq -n --argjson a "$(IFS=,; printf '[%s]' "${actions[@]}")" --argjson r "$(IFS=,; printf '[%s]' "${results[@]}")" \
+results_json=$(json_array "${results[@]}")
+[[ $(jq 'length' <<<"${results_json}") == "${count}" ]] \
+  || die 'internal: every entry was not read back'
+merged=$(jq -n --argjson a "${entries_json}" --argjson r "${results_json}" \
   '{entries: [ $a[] as $e | ($r[] | select(.canonical_ref == $e.canonical_ref)) as $v | $e + {digest_matches: $v.digest_matches} ]}')
-jq -n --arg mode "${mode}" --arg plan "${plan##*/}" --argjson merged "${merged}" \
-  '{mode:$mode, plan:$plan, entries:$merged.entries}' | jq -S '.' > "${record}"
+# A name missing from the read-back would drop out of the merged array rather than fail, and a record
+# with fewer entries than the plan is not a proof about the plan.
+[[ $(jq '.entries | length' <<<"${merged}") == "${count}" ]] \
+  || die 'internal: a written name was not read back'
+jq -n --arg mode "${mode}" --arg plan "${plan##*/}" --arg stage post-write \
+  --argjson merged "${merged}" \
+  '{mode:$mode, plan:$plan, stage:$stage, entries:$merged.entries}' | jq -S '.' > "${record}"
 if [[ $(jq -r '[.entries[] | select(.digest_matches | not)] | length' "${record}") != 0 ]]; then
   jq -r '.entries[] | select(.digest_matches | not) | "entry \(.host): \(.canonical_ref) does not resolve to these bytes"' \
     "${record}" >&2
