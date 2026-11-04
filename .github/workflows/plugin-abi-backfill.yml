@@ -68,6 +68,9 @@ jobs:
         run: scripts/backfill-runtime-canonicals.sh apply
       - name: Upload the backfill record
         # actions/upload-artifact v4
+        # Uploaded even when the job failed, and the file says which moment it describes. A run that died
+        # among its writes leaves a `pre-write` record whose unread entries say `null`, so an always-on
+        # upload cannot turn an unfinished run into a claim that a published name holds the wrong bytes.
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:

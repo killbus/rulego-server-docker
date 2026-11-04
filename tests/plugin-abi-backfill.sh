@@ -81,6 +81,12 @@ fi
 if [[ ${1:-} == buildx && ${2:-} == imagetools && ${3:-} == create ]]; then
   [[ ${4:-} == --tag ]] || { printf 'unexpected create form: %s\n' "$*" >&2; exit 64; }
   printf '%s\t%s\n' "$5" "$6" >>"${MOCK_WRITES}"
+  # The attempt is logged and nothing is stored: a registry that refuses a write is a different outcome
+  # from one that accepts it, and the run has to stop holding a record that says so honestly.
+  if [[ -n ${MOCK_CREATE_FAIL:-} ]]; then
+    printf 'create failed: unexpected status: 500 Internal Server Error\n' >&2
+    exit 1
+  fi
   jq -cn --arg digest "${6##*@}" '{digest: $digest, manifests: [], annotations: {}}' \
     >"${MOCK_REGISTRY_DIR}/$(printf '%s' "${5##*/}" | tr ':@' '__')"
   exit 0
@@ -150,8 +156,8 @@ out=$(run_writer check 2>&1) || status=$?
 (( status == 0 )) || die "a valid plan with a free name was refused: ${out}"
 [[ $(jq -er '.entries[0].action' "${test_root}/report.json") == mint ]] ||
   die 'a free name was not reported as a write candidate'
-[[ $(jq -er '.entries[0].digest_matches' "${test_root}/report.json") == false ]] ||
-  die 'check mode claimed the bytes were already in place'
+jq -e '.entries[0] | .action == "mint" and .digest_matches == null' "${test_root}/report.json" >/dev/null ||
+  die "check mode stated an answer for a name it did not read: $(jq -c '.entries[0]' "${test_root}/report.json")"
 [[ ! -s ${MOCK_WRITES} ]] || die 'check mode wrote'
 
 # apply without the acknowledgement must refuse before it asks the registry anything.
@@ -235,6 +241,84 @@ out=$(MOCK_TAG_UNREACHABLE=1 run_writer check 2>&1) || status=$?
 grep -Fq 'could not answer whether the name exists' <<<"${out}" ||
   die "name-lookup failure handled wrongly: ${out}"
 [[ ! -s ${MOCK_WRITES} ]] || die 'a name lookup failure still wrote'
+
+# A write the registry refuses stops the run, and the record it leaves behind is the one written before
+# anything was attempted. That file has to say what it knows and nothing more: an entry never read back
+# reports `null`, because `false` would be an observation about a name this run did not make.
+status=0
+: >"${MOCK_WRITES}"
+out=$(MOCK_CREATE_FAIL=1 PLUGIN_ABI_BACKFILL_APPLY=1 run_writer apply 2>&1) || status=$?
+(( status != 0 )) || die 'a refused write was reported as a completed backfill'
+grep -Fq 'the registry refused the write' <<<"${out}" ||
+  die "the refused write did not name itself: ${out}"
+[[ $(wc -l <"${MOCK_WRITES}") == 1 ]] || die 'the refused write was not logged as an attempt'
+[[ ! -f ${MOCK_REGISTRY_DIR}/$(reference_file "${canonical}") ]] ||
+  die 'a refused create still left the name resolving to bytes'
+jq -e '.stage == "pre-write"' "${test_root}/report.json" >/dev/null ||
+  die "a record left by an unfinished write claimed to be an answer: $(jq -c '.stage' "${test_root}/report.json")"
+jq -e '.entries[0] | .action == "mint" and .digest_matches == null' "${test_root}/report.json" >/dev/null ||
+  die "the unread entry reported an observation: $(jq -c '.entries[0]' "${test_root}/report.json")"
+
+# Two hosts is the ordinary plan, and it is the shape that broke the record assembly after both writes
+# had already succeeded in CI: an array of entry objects joined as a string is valid JSON for one entry
+# and invalid for two. Both names have to be written, both read back, and the record has to carry one
+# entry per plan entry with the read's answer rather than the write's intention.
+ai_host=ai-plugin
+ai_cast=sha256:$(printf 'a%.0s' {1..64})
+ai_canonical_tag=$(jq -er --arg h "${ai_host}" '.runtime[$h].canonical' <<<"${tags}")
+ai_canonical_tag=${ai_canonical_tag#*:}
+ai_alias_tag=$(jq -er --arg h "${ai_host}" '.runtime[$h].alias' <<<"${tags}")
+ai_alias_tag=${ai_alias_tag#*:}
+ai_canonical=${repo}:${ai_canonical_tag}
+ai_alias_ref=${repo}:${ai_alias_tag}
+[[ ${ai_canonical} != "${canonical}" && ${ai_canonical} != "${alias_ref}" ]] ||
+  die 'the second host does not have its own names, so this case proves nothing'
+register_cast "${ai_cast}" "${revision}" "${release_version}"
+# The two entries are assembled the way the writer assembles them: parsed and slurped, not concatenated.
+printf '%s\n' \
+  "$(jq -cn --arg h "${host}" --arg d "${cast_digest}" --arg r "${revision}" \
+     --arg c "${canonical}" --arg a "${alias_ref}" \
+     '{host: $h, digest: $d, packaging_revision: $r, canonical_ref: $c, displaced_alias: $a}')" \
+  "$(jq -cn --arg h "${ai_host}" --arg d "${ai_cast}" --arg r "${revision}" \
+     --arg c "${ai_canonical}" --arg a "${ai_alias_ref}" \
+     '{host: $h, digest: $d, packaging_revision: $r, canonical_ref: $c, displaced_alias: $a}')" \
+  | jq -sc '{schema_version: 1, entries: .}' >"${test_root}/plan.json"
+status=0
+: >"${MOCK_WRITES}"
+out=$(PLUGIN_ABI_BACKFILL_APPLY=1 run_writer apply 2>&1) || status=$?
+(( status == 0 )) || die "the two-host apply failed: ${out}"
+[[ $(wc -l <"${MOCK_WRITES}") == 2 ]] ||
+  die "the two-host plan wrote $(wc -l <"${MOCK_WRITES}") names, not 2"
+jq -e '.stage == "post-write"
+  and ([.entries[].action] | all(. == "mint"))
+  and ([.entries[].digest_matches] | all(. == true))' "${test_root}/report.json" >/dev/null ||
+  die "the two-host record is not the read-back it claims: $(jq -c '.entries' "${test_root}/report.json")"
+# The record is not the registry: each written name is read from the stand-in itself.
+[[ $(jq -er '.digest' "${MOCK_REGISTRY_DIR}/$(reference_file "${canonical}")") == "${cast_digest}" ]] ||
+  die "the name ${canonical##*:} does not hold the bytes the plan named"
+[[ $(jq -er '.digest' "${MOCK_REGISTRY_DIR}/$(reference_file "${ai_canonical}")") == "${ai_cast}" ]] ||
+  die "the name ${ai_canonical##*:} does not hold the bytes the plan named"
+
+# A read-only run over the same two names writes nothing and is labelled as a read.
+status=0
+: >"${MOCK_WRITES}"
+out=$(run_writer check 2>&1) || status=$?
+(( status == 0 )) || die "the two-host check failed: ${out}"
+[[ ! -s ${MOCK_WRITES} ]] || die 'a check wrote'
+jq -e '.stage == "read-only"' "${test_root}/report.json" >/dev/null ||
+  die 'a run that writes nothing is not labelled as a read'
+
+# And applying it again finds both names already holding exactly these bytes: no write, still two entries,
+# each true because the read said so.
+status=0
+: >"${MOCK_WRITES}"
+out=$(PLUGIN_ABI_BACKFILL_APPLY=1 run_writer apply 2>&1) || status=$?
+(( status == 0 )) || die "the idempotent two-host apply failed: ${out}"
+[[ ! -s ${MOCK_WRITES} ]] || die 'the idempotent two-host apply wrote again'
+jq -e '(.entries | length) == 2
+  and ([.entries[].action] | all(. == "noop"))
+  and ([.entries[].digest_matches] | all(. == true))' "${test_root}/report.json" >/dev/null ||
+  die "the idempotent two-host record is wrong: $(jq -c '.entries' "${test_root}/report.json")"
 
 # The committed plan is graded offline as well: every name it carries is what the naming function
 # produces for the revision that image itself carries, and the set of names is exactly the set the

@@ -291,8 +291,10 @@ gives them the names the naming function produces for the packaging revision eac
 its own config, from `plugin-abi-backfill.json`. It is dispatch-only and its `apply` input must be
 `true` to write; a dispatch with `apply=false` re-derives everything and touches nothing. Every
 target must be absent or already hold exactly those bytes, so a name that holds other content is a
-refusal rather than a rewrite, and the record it uploads states what each name resolves to after the
-run rather than what the write was expected to do. A plan is only accepted when the commit it cites
+refusal rather than a rewrite. The record it uploads is labelled with the moment it describes:
+`post-write` answers what each name resolves to now, `pre-write` is what a run that died among its
+writes leaves behind, and an entry nobody read back says `null` instead of `false` so a stopped run
+cannot accuse a name it never checked. A plan is only accepted when the commit it cites
 resolves in the checkout it is graded from, so this workflow and the offline suite both fetch the full
 history: a shallow clone refuses instead of guessing. It exists as a workflow because a runner's
 `GITHUB_TOKEN` is the only credential here that can push a container, and it stays because the write
