@@ -1,0 +1,76 @@
+name: Backfill canonical names for published runtime casts
+
+# One-time repair, kept dispatchable because the repair it performs is idempotent and its refusals are
+# the point. `plugin-abi-publish.yml` can only mint names for bytes it builds itself, so the two
+# runtime casts that were published before per-build canonical names existed and then lost their only
+# name to an alias promotion stay unnamed unless something writes them. That write needs a credential
+# with package push, which only a runner's GITHUB_TOKEN has here, so the work runs in CI.
+#
+# `apply=false` is the read-only mode: it re-derives every name from the bytes themselves and reports
+# what it would write, touching nothing. A name that already holds other bytes is a refusal in either
+# mode, because rewriting a published name is the one thing this contract does not permit.
+
+on:
+  workflow_dispatch:
+    inputs:
+      apply:
+        description: Write the derived canonical names (false runs the read-only checks and writes nothing)
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: plugin-abi-backfill
+  cancel-in-progress: false
+
+jobs:
+  backfill:
+    name: Mint derived canonical names
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    environment: plugin-abi-release
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Check out repository
+        # actions/checkout v7.0.1
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+          # The plan names bytes by the commit they were built from, and the writer refuses to mint a
+          # name for a revision it cannot resolve here. That refusal is the point of the gate, so the
+          # job is given the history that lets a correct plan pass it instead of loosening the gate.
+          fetch-depth: 0
+      - name: Set up Docker Buildx
+        # docker/setup-buildx-action v4.3.0
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e
+      - name: Verify the plan writes nothing it does not prove
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: scripts/backfill-runtime-canonicals.sh check
+      - name: Log in to GHCR
+        # docker/login-action v4.6.0
+        if: ${{ inputs.apply }}
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Mint the names
+        if: ${{ inputs.apply }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PLUGIN_ABI_BACKFILL_APPLY: "1"
+        run: scripts/backfill-runtime-canonicals.sh apply
+      - name: Upload the backfill record
+        # actions/upload-artifact v4
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: plugin-abi-backfill-${{ github.run_id }}
+          path: tmp/plugin-abi-backfill-report.json
+          if-no-files-found: error

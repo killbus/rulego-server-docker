@@ -285,6 +285,19 @@ move each host alias onto the canonical index this release verified, one host at
 digest every alias held beforehand. A failed verification therefore leaves both tracks pointing at
 the last build that passed, which is the property a moving name has to have to be safe to publish.
 
+Two runtime casts were published before per-build canonical names existed, and the alias promotion
+above took their only names. [The backfill workflow](.github/workflows/plugin-abi-backfill.yml)
+gives them the names the naming function produces for the packaging revision each image carries in
+its own config, from `plugin-abi-backfill.json`. It is dispatch-only and its `apply` input must be
+`true` to write; a dispatch with `apply=false` re-derives everything and touches nothing. Every
+target must be absent or already hold exactly those bytes, so a name that holds other content is a
+refusal rather than a rewrite, and the record it uploads states what each name resolves to after the
+run rather than what the write was expected to do. A plan is only accepted when the commit it cites
+resolves in the checkout it is graded from, so this workflow and the offline suite both fetch the full
+history: a shallow clone refuses instead of guessing. It exists as a workflow because a runner's
+`GITHUB_TOKEN` is the only credential here that can push a container, and it stays because the write
+is idempotent and its refusals are the point.
+
 ## Maintenance checks
 
 The preparation script requires Bash, curl, jq, Python 3, tar, and GNU

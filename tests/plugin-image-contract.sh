@@ -111,6 +111,7 @@ assert_contains scripts/plugin-abi-build.sh '-gcflags=all=-N'
 
 verify_workflow=.github/workflows/plugin-abi.yml
 publish_workflow=.github/workflows/plugin-abi-publish.yml
+backfill_workflow=.github/workflows/plugin-abi-backfill.yml
 assert_contains "${verify_workflow}" 'run: scripts/plugin-abi-build.sh "${{ matrix.goarch }}"'
 assert_contains "${publish_workflow}" 'run: scripts/plugin-abi-build.sh "${{ matrix.goarch }}"'
 assert_contains "${publish_workflow}" 'run: scripts/plugin-abi-publish.sh tmp/evidence'
@@ -131,7 +132,7 @@ if grep -Fq 'packages: write' "${verify_workflow}"; then
   echo 'ordinary Plugin ABI verification requested package-write permission' >&2
   exit 1
 fi
-if grep -Eq 'docker (build|run|pull|create|image|buildx)|jq[[:space:]]|oras[[:space:]]' "${verify_workflow}" "${publish_workflow}"; then
+if grep -Eq 'docker (build|run|pull|create|image|buildx)|jq[[:space:]]|oras[[:space:]]' "${verify_workflow}" "${publish_workflow}" "${backfill_workflow}"; then
   echo 'Plugin ABI workflow contains repository business logic' >&2
   exit 1
 fi
@@ -140,10 +141,60 @@ if grep -Eq 'packaging_correction|packaging-correction|oci\.tar|oras-project' "$
   exit 1
 fi
 
+# The backfill is the only path that writes a name for bytes this pipeline did not build, so its
+# ordering is asserted the same way the promotion's is: the read-only proof runs first, and nothing
+# that can write is reachable unless the dispatch said `apply`. The record is required rather than
+# optional, because a run that wrote something and cannot say what it wrote is not evidence.
+assert_contains "${backfill_workflow}" 'run: scripts/backfill-runtime-canonicals.sh check'
+assert_contains "${backfill_workflow}" 'run: scripts/backfill-runtime-canonicals.sh apply'
+assert_contains "${backfill_workflow}" 'environment: plugin-abi-release'
+assert_contains "${backfill_workflow}" 'packages: write'
+assert_contains "${backfill_workflow}" 'PLUGIN_ABI_BACKFILL_APPLY: "1"'
+assert_contains "${backfill_workflow}" 'if-no-files-found: error'
+check_step_line=$(grep -Fn 'run: scripts/backfill-runtime-canonicals.sh check' "${backfill_workflow}" | cut -d: -f1)
+apply_step_line=$(grep -Fn 'run: scripts/backfill-runtime-canonicals.sh apply' "${backfill_workflow}" | cut -d: -f1)
+(( apply_step_line > check_step_line )) || {
+  echo 'the backfill can write before it has proved the plan reads the way it claims' >&2
+  exit 1
+}
+# Both write-capable steps are gated, and the acknowledgement is set exactly once.
+if [[ $(grep -Fc 'if: ${{ inputs.apply }}' "${backfill_workflow}") != 2 ]]; then
+  echo 'the backfill login or write step is not gated on the apply input' >&2
+  exit 1
+fi
+if [[ $(grep -Fc 'PLUGIN_ABI_BACKFILL_APPLY' "${backfill_workflow}") != 1 ]]; then
+  echo 'the backfill acknowledgement is set anywhere but on the writing step' >&2
+  exit 1
+fi
+
+# Both of these jobs grade a plan by asking whether the revision it cites is a commit of the checkout,
+# which a depth-one checkout answers no to even when the plan is correct. The checkout depth is
+# therefore part of what those jobs can prove, and it belongs to exactly the jobs that need it: no other
+# Plugin ABI job resolves a cited commit, so none should ask for history it does not use.
+assert_contains "${verify_workflow}" 'fetch-depth: 0'
+assert_contains "${backfill_workflow}" 'fetch-depth: 0'
+if [[ $(grep -cF 'fetch-depth: 0' "${verify_workflow}") != 1 ]]; then
+  echo 'the offline job must check out with history, and no other job there should ask for it' >&2
+  exit 1
+fi
+if [[ $(grep -cF 'fetch-depth: 0' "${backfill_workflow}") != 1 ]]; then
+  echo 'the backfill job must check out with the history its plan gate needs' >&2
+  exit 1
+fi
+# The one depth line in the verification workflow has to be the offline job's own checkout, so that
+# adding depth somewhere else cannot silently stand in for the job that needs it.
+offline_job_line=$(grep -Fn '  offline:' "${verify_workflow}" | cut -d: -f1)
+offline_run_line=$(grep -Fn 'run: tests/run.sh' "${verify_workflow}" | cut -d: -f1)
+offline_depth_line=$(grep -Fn 'fetch-depth: 0' "${verify_workflow}" | cut -d: -f1)
+(( offline_depth_line > offline_job_line && offline_depth_line < offline_run_line )) || {
+  echo 'the offline job checks out without the history its plan gate needs' >&2
+  exit 1
+}
+
 while IFS= read -r action_reference; do
   revision=${action_reference##*@}
   [[ ${revision} =~ ^[0-9a-f]{40}$ ]] || { printf 'non-immutable action reference: %s\n' "${action_reference}" >&2; exit 1; }
-done < <(awk '$1 == "uses:" {print $2}' "${verify_workflow}" "${publish_workflow}")
+done < <(awk '$1 == "uses:" {print $2}' "${verify_workflow}" "${publish_workflow}" "${backfill_workflow}")
 
 if grep -Eq 'github_api_get|releases/download' scripts/plugin-abi-build.sh scripts/verify-plugin-runtime.sh; then
   echo 'Plugin ABI verification downloads an external plugin' >&2
