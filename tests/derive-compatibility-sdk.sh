@@ -238,14 +238,17 @@ mv "${test_root}/stored" "$(reference_file)"
 refusal 'a registry that would not answer' 'could not answer' derive_unreachable
 
 # The tag resolved, then moved before the index was read. Handing back the moved digest would send the
-# probe to bytes that no longer answer to the name the block records.
+# probe to bytes that no longer answer to the name the block records. Both answers carry the honest
+# annotation, so the only thing that differs between them is the thing under test.
 jq -cn --arg digest "${index_digest}" --arg amd64 "${amd64_child}" --arg arm64 "${arm64_child}" \
-  '{digest: $digest, manifests: [
+  --arg abi "${previous_abi_id}" \
+  '{digest: $digest, annotations: {"io.rulego.abi.id": $abi}, manifests: [
      {platform: {os:"linux", architecture:"amd64"}, digest: $amd64},
      {platform: {os:"linux", architecture:"arm64"}, digest: $arm64}]}' \
   >"${MOCK_REGISTRY_DIR}/response-1.json"
 jq -cn --arg digest "${moved_digest}" --arg amd64 "${amd64_child}" --arg arm64 "${arm64_child}" \
-  '{digest: $digest, manifests: [
+  --arg abi "${previous_abi_id}" \
+  '{digest: $digest, annotations: {"io.rulego.abi.id": $abi}, manifests: [
      {platform: {os:"linux", architecture:"amd64"}, digest: $amd64},
      {platform: {os:"linux", architecture:"arm64"}, digest: $arm64}]}' \
   >"${MOCK_REGISTRY_DIR}/response-2.json"
@@ -332,4 +335,68 @@ jq -cn --arg revision "${other_commit}" \
   >"$(ref_file "${sdk_image}@${config_digest}")"
 refusal 'a published image built from another commit' 'was built from' derive "${previous_commit}"
 
+
+# --- asking about a generation by its identity ---
+#
+# A published generation can outlive the commit it names. One of the real ones was cut from a dispatch ref
+# that was later rewritten, so no ref of this repository carries its commit -- while the tag resolves, the
+# index answers to its own name, and both architectures are there. The identity has to be enough to ask
+# with, because it is the only question about such a release that can still be answered, and it is what
+# `derive auto` asks when the newest generation is one of these.
+foreign_abi="abi-$(printf '2%.0s' {1..64})"
+orphan_revision=$(printf 'f%.0s' {1..40})
+
+register "${orphan_revision}"
+orphan_block=$(derive "${previous_abi_id}") || {
+  echo 'a generation whose commit is not here could not be derived by its identity' >&2
+  exit 1
+}
+jq -e --arg abi "${previous_abi_id}" --arg repository "ghcr.io/killbus/${sdk_image}" \
+  --arg index "${index_digest}" --arg amd64 "${amd64_child}" --arg arm64 "${arm64_child}" \
+  '. == {abi_id: $abi, repository: $repository, index_digest: $index,
+         children: {amd64: $amd64, arm64: $arm64}}' <<<"${orphan_block}" >/dev/null || {
+  printf 'deriving by identity did not answer with the published bytes: %s\n' "${orphan_block}" >&2
+  exit 1
+}
+
+# The same generation asked about by revision is still refused. Naming a source is asking whether the bytes
+# came from it, and "that commit is not here" is not an answer to the question that was asked -- it is only a
+# reason to stop asking it.
+refusal 'a revision whose published image cites another commit' 'was built from' \
+  derive "${previous_commit}"
+
+# When the cited commit IS here it is a witness, not an option. This one is in the synthetic history and
+# carries no contract at all: the name, the annotation and the digests all agree, and the generation's own
+# source contradicts it. Deriving from that would paste a mismatch into a release record.
+register "${other_commit}"
+refusal 'a published generation citing a commit with no contract here' \
+  'carries no plugin ABI identity' derive "${previous_abi_id}"
+
+# And a commit that is here, does carry a contract, and records a different identity: the same claim refused
+# with the two names side by side, which is what an operator has to read in order to tell an orphan from a
+# repointed tag.
+jq -c --arg abi "${foreign_abi}" '.abi_id = $abi' "${test_root}/restored.lock" \
+  >"${test_root}/repo/plugin-abi.lock"
+git_in_repo add plugin-abi.lock
+git_in_repo commit -q -m a-revision-recording-another-identity
+foreign_commit=$(git_in_repo rev-parse HEAD)
+register "${foreign_commit}"
+refusal 'a published generation citing a commit that records another identity' 'instead' \
+  derive "${previous_abi_id}"
+
+# With the commit it cites present and agreeing, the identity question and the revision question return the
+# same bytes: one path is not stricter than the other, it only asks less of history.
+register "${previous_commit}"
+asserted=$(derive "${previous_abi_id}") || {
+  echo 'the identity path refused a generation whose commit is here and agrees' >&2
+  exit 1
+}
+by_revision=$(derive "${previous_commit}") || {
+  echo 'the revision path refused a generation it used to derive' >&2
+  exit 1
+}
+[[ ${asserted} == "${by_revision}" ]] || {
+  echo 'the identity path and the revision path returned different blocks for one generation' >&2
+  exit 1
+}
 echo 'Compatibility SDK rotation derives from the registry and refuses to invent one'

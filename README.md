@@ -325,20 +325,42 @@ jq --argjson block "${block}" '.compatibility.previous_sdk = $block' \
 scripts/plugin-abi.sh validate --candidate
 ```
 
-`derive auto` asks which generation is newest and derives from the revision that
-published it. Pass a revision to `derive` to rebuild the record of an older generation,
-or run `previous` to read the answer without asking for a block. The identity comes from
-the lock at that revision, never from a recomputation: the identity function's domain has
-changed once, so today's function hashes an older contract into a name that generation was
-never published under, and requiring the recomputation to validate would refuse every real
-predecessor. Three independent claims have to agree instead -- the lock at that revision
-records this identity, the published index annotates itself with it, and the image's own
-config names that revision as the commit it was built from. The helper reads the digests
-from the registry and refuses rather than guess: no lock in the revision, a lock recording
-no identity or one that is not a digest, a tag nobody published, a registry that would not
-answer, an index annotating an identity other than the tag it answers to, an index missing
-an architecture, an index that resolves both architectures to one digest, an image built
-from a commit that is not the one asked about, or a tag that moved between its two reads.
+There are two ways to name a published generation, and they ask different questions. A
+revision asks "the release cut from this source": its identity comes from the lock at that
+revision, never from a recomputation, because the identity function's domain has changed
+once and today's function hashes an older contract into a name that generation was never
+published under. An identity asks "the release published under this name", and it is the
+only question still answerable about a generation whose commit this checkout cannot
+read -- its identity then comes from what the published index annotates itself with.
+`derive auto` uses the second form, because a commit is the one thing a published
+generation is allowed to stop having; `previous` prints the same answer as an identity and
+a commit, with `-` for a commit that is not here.
+
+What has to agree is checked claim by claim: the tag resolves, the published index
+annotates the identity it is named for, the two architectures are present and distinct,
+and the image's own config names the commit it was built from. Against a revision that last
+claim must name that revision; against an identity it must either name a commit that is
+here and whose lock records the same identity, or be reported as unreadable. Refused
+rather than guessed: no lock in the revision, a lock recording no identity or one that is
+not a digest, a tag nobody published, a registry that would not answer, an index
+annotating an identity other than the tag it answers to, an index missing an architecture,
+an index that resolves both architectures to one digest, an image built from a commit that
+is not the one asked about, a commit that is here but carries no contract or a different
+one, or a tag that moved between its two reads.
+
+An unreachable commit is not on that list, and that is a measured fact rather than a
+preference: of the published SDK tags in this repository, one cites a commit that no
+remote ref carries, because it was cut from a dispatch ref that was later rewritten. A rule
+that refuses an undated generation therefore makes the gate permanently red, and the only
+way to green is to edit the gate by hand -- the transcription this helper exists to remove.
+Publication order is the authority for which generation came last, because the registry
+always records it; commit dates are the witness, read where they can be read. What stops
+the answer is a contradiction between the two, not a missing witness: a listed tag that
+does not resolve, a name holding an index that answers to another identity, a later
+publication whose commit is older, a later publication built from a commit the earlier one
+descends from, or a list of more than one generation where this checkout can date none --
+which is how a shallow clone answers, and where trusting the order with no witness at all
+would repeat the mistake that turned PR #21 red.
 
 `scripts/derive-compatibility-sdk.sh check` reads the other way round: it takes the
 record the lock already carries, compares it with the published index and both

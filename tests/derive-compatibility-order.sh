@@ -7,9 +7,12 @@
 # A record can match the registry byte for byte and still be one generation behind, and nothing inside the
 # recorded bytes shows it: the tag resolves, both architectures agree, and every check that existed before
 # this gate is satisfied -- while the compatibility probe quietly proves compatibility with a release nobody
-# would call the previous one. So the newest generation is taken from the registry's own tag list and dated
-# by the commit each published image names in its config, and every way that answer could be wrong has to be
-# a refusal rather than a shorter list.
+# would call the previous one. So the newest generation is taken from the registry's own tag list, in the
+# order it was pushed, and cross-checked against the commit each published image names in its config. The
+# order is the authority because it is always readable; the commit is the witness, and it is readable only
+# while the commit still is here. What has to be a refusal, rather than a shorter list, is a contradiction
+# between the two, a registry that answers halfway, and a checkout that can reach no witness at all -- never
+# a generation that simply cannot be dated.
 
 set -Eeuo pipefail
 
@@ -38,6 +41,8 @@ gen_new=$(abi_id newest-generation)
 gen_tie=$(abi_id tied-generation)
 gen_base=$(abi_id inversion-base)
 gen_desc=$(abi_id inversion-descendant)
+gen_anc=$(abi_id ancestor-published-after-its-own-descendant)
+gen_post=$(abi_id descendant-published-before-its-own-ancestor)
 
 git_in_repo() {
   (cd "${test_root}/repo" && git -c user.name=order-test -c user.email=order-test@example.invalid "$@")
@@ -189,7 +194,7 @@ export REGISTRY_RETRY_ATTEMPTS=1 REGISTRY_RETRY_INITIAL_DELAY=1 REGISTRY_RETRY_M
 git_in_repo init -q
 git_in_repo commit -q --allow-empty -m before-the-first-release
 
-release '2026-08-26T04:00:00Z' release-2026-08-26 "${gen_old}" >/dev/null
+old_rev=$(release '2026-08-26T04:00:00Z' release-2026-08-26 "${gen_old}")
 mid_rev=$(release '2026-10-22T04:00:00Z' release-2026-10-22 "${gen_mid}")
 new_rev=$(release '2026-10-31T04:00:00Z' release-2026-10-31 "${gen_new}")
 # This release's own identity is published too, and cut last. If the order did not exclude it, the answer
@@ -238,8 +243,8 @@ refusal() {
   }
 }
 
-# The order itself: newest by the commits' own dates, not newest by name, not last in the list, and never
-# this release's identity.
+# The order itself: newest by publication, not newest by name, never by the position of a sort, and never
+# this release's own identity.
 answered=$(previous) || {
   echo 'the newest published generation could not be named' >&2
   exit 1
@@ -257,14 +262,22 @@ derived=$(helper derive auto) || {
   echo 'auto could not derive the newest published generation' >&2
   exit 1
 }
-jq -e --arg abi "${gen_new}" --arg index "$(digest_of "index-${gen_new}")" \
-  --arg amd64 "$(digest_of "amd64-${gen_new}")" --arg arm64 "$(digest_of "arm64-${gen_new}")" \
-  --arg repository "ghcr.io/killbus/${sdk_image}" '
-  . == {abi_id: $abi, repository: $repository, index_digest: $index,
-        children: {amd64: $amd64, arm64: $arm64}}' <<<"${derived}" >/dev/null || {
-  printf 'auto derived a block that is not the newest published generation: %s\n' "${derived}" >&2
-  exit 1
+block_of() {
+  jq -cn --arg abi "$1" --arg index "$(digest_of "index-$1")" \
+    --arg amd64 "$(digest_of "amd64-$1")" --arg arm64 "$(digest_of "arm64-$1")" \
+    --arg repository "ghcr.io/killbus/${sdk_image}" \
+    '{abi_id: $abi, repository: $repository, index_digest: $index,
+      children: {amd64: $amd64, arm64: $arm64}}'
 }
+assert_block() {
+  local description=$1 want=$2 got=$3
+  jq -e --argjson want "${want}" '. == $want' <<<"${got}" >/dev/null || {
+    printf '%s\nexpected: %s\ngot:      %s\n' "${description}" "${want}" "${got}" >&2
+    exit 1
+  }
+}
+assert_block 'auto derived a block that is not the newest published generation' \
+  "$(block_of "${gen_new}")" "${derived}"
 
 # A record naming the newest generation is accepted, and the acceptance says so out loud: the gate has to be
 # readable as a pass, not just as the absence of a failure.
@@ -287,26 +300,112 @@ jq --argjson block "${stale}" '.compatibility.previous_sdk = $block' "${current_
 refusal 'a record one generation behind' 'is not the newest published generation' \
   check_lock "${test_root}/stale-record.lock"
 
-# A generation whose image names no commit cannot be placed in an order. Skipping it would leave the order
-# answering for a list that is missing its newest entry, which is how a stale record starts looking current.
+# --- a generation this checkout cannot date is still a published generation ---
+#
+# This is the case that made the first version of the gate unsatisfiable. A real published tag cites a
+# commit that no remote ref of this repository carries, because it was cut from a dispatch ref that was
+# later rewritten. Nothing about that release is missing: the name resolves, the index annotates itself,
+# both architectures answer, and the registry knows where it sits in the order. Refusing here does not
+# protect anyone -- it makes the gate permanently red, and the only way back to green is to edit the gate
+# by hand, which is the transcription this script exists to remove.
 write_label "${gen_new}" 'unlabelled'
-refusal 'a published image that does not name its commit' 'does not name the commit' previous
-publish "${gen_new}" "${new_rev}"
+undated=$(previous) || {
+  echo 'the order refused a generation only because this checkout cannot date it' >&2
+  exit 1
+}
+[[ ${undated} == "${gen_new}"$'\t'"-" ]] || {
+  printf 'the undated newest generation was answered as %s\n' "${undated}" >&2
+  exit 1
+}
 
-# A commit that is not in this checkout cannot be dated either. The image reads fine, so nothing else would
-# notice, and the generation silently dropped is the one the record should have named.
+# and `derive auto` still derives its block, through the identity rather than through the commit: the
+# digests come from the registry and the name comes from what the published index says it is.
+assert_block 'auto could not derive a generation whose commit is not here' \
+  "$(block_of "${gen_new}")" "$(helper derive auto)"
+
+# The same answer when the commit is a well-formed one that simply is not in this checkout, which is the
+# shape a rewritten ref leaves behind. It used to be a refusal; it is a `-` now.
 write_label "${gen_new}" "$(printf 'e%.0s' {1..40})"
-refusal 'a published image naming a commit that is not here' 'is not in this checkout' previous
+undated=$(previous) || {
+  echo 'the order refused a generation whose commit is not in this checkout' >&2
+  exit 1
+}
+[[ ${undated} == "${gen_new}"$'\t'"-" ]] || {
+  printf 'a generation naming an absent commit was answered as %s\n' "${undated}" >&2
+  exit 1
+}
+assert_block 'auto could not derive a generation naming an absent commit' \
+  "$(block_of "${gen_new}")" "$(helper derive auto)"
+
+# A generation can be named by its identity directly, which is the only question answerable about one once
+# its commit is gone. Same bytes, same block, and no local lock has to exist for it.
+assert_block 'derive by identity did not answer with the published bytes' \
+  "$(block_of "${gen_new}")" "$(helper derive "${gen_new}")"
+
+# A gate that cannot tell where it is being pointed still has to be checked against the registry, so an
+# undated winner is accepted by the freshness half rather than argued with.
+jq --argjson block "$(helper derive "${gen_new}")" \
+  '.compatibility.previous_sdk = $block' "${current_lock}" >"${test_root}/undated-record.lock"
+check_lock "${test_root}/undated-record.lock" >/dev/null || {
+  echo 'the gate refused a record naming the newest generation, which this checkout cannot date' >&2
+  exit 1
+}
+
 publish "${gen_new}" "${new_rev}"
 
+# More than one generation and no witness at all is a different thing: it is how a shallow checkout answers
+# (PR #21), where publication order is the only clock the reader has and it has never been cross-checked
+# against anything. Order is trusted when at least one entry can be compared with history, and refused when
+# none can.
+for undate in "${gen_old}" "${gen_mid}" "${gen_new}"; do
+  write_label "${undate}" 'unlabelled'
+done
+refusal 'a checkout that cannot date any published generation' 'cannot date any' previous
+publish "${gen_old}" "${old_rev}"
+publish "${gen_mid}" "${mid_rev}"
+publish "${gen_new}" "${new_rev}"
+
+# One generation, undated: no ordering claim is being made about it, so there is nothing to cross-check and
+# a first predecessor cut from a rewritten ref is still derivable. That exemption is the difference between
+# a gate that waits for history and a gate that cannot open.
+jq -cn --arg new "${gen_new}" '["latest", $new]' >"${MOCK_TAG_LIST}"
+write_label "${gen_new}" 'unlabelled'
+alone=$(previous) || {
+  echo 'the order refused the only published generation because it could not be dated' >&2
+  exit 1
+}
+[[ ${alone} == "${gen_new}"$'\t'"-" ]] || {
+  printf 'the only published generation was answered as %s\n' "${alone}" >&2
+  exit 1
+}
+publish "${gen_new}" "${new_rev}"
+standard_tags
+
+# --- what still has to stop the answer ---
+#
 # A name on the list that does not resolve: the registry has contradicted itself, and after that no answer
 # about order is safe to give.
 rm -f "$(ref_file "${sdk_image}:${gen_new}")"
 refusal 'a listed tag that does not resolve' 'does not resolve' previous
 publish "${gen_new}" "${new_rev}"
 
-# Two generations cut in the same second. Dates cannot say which one this release follows, and neither can
-# the order of a tag list; choosing by sort position would be a coin flip presented as a finding.
+# A name that resolves to an index answering to a different identity. Ordering by it would place a release
+# at a position its own content never earned, and the record would then name bytes that belong to somebody
+# else under a name this checkout believes it read.
+wrong_abi=$(abi_id a-different-generation)
+jq -cn --arg digest "$(digest_of "index-${gen_new}")" --arg amd64 "$(digest_of "amd64-${gen_new}")" \
+  --arg arm64 "$(digest_of "arm64-${gen_new}")" --arg abi "${wrong_abi}" \
+  '{digest: $digest, annotations: {"io.rulego.abi.id": $abi}, manifests: [
+    {platform: {os: "linux", architecture: "amd64"}, digest: $amd64},
+    {platform: {os: "linux", architecture: "arm64"}, digest: $arm64}]}' \
+  >"$(ref_file "${sdk_image}:${gen_new}")"
+refusal 'a listed name holding another generation' \
+  'name and the content of a published generation disagree' previous
+publish "${gen_new}" "${new_rev}"
+
+# Two generations cut in the same second. Dates cannot say which one this release follows, and the registry
+# can: it lists them in the order they were pushed, and that order is the publication record. This used to
+# be a refusal, which asked the weaker clock to settle a question the stronger one already answers.
 tie_rev=$(release '2026-10-31T04:00:00Z' release-tied-with-the-newest "${gen_tie}")
 [[ ${tie_rev} != "${new_rev}" ]] || {
   echo 'the tie scenario cut two generations into one commit' >&2
@@ -314,12 +413,18 @@ tie_rev=$(release '2026-10-31T04:00:00Z' release-tied-with-the-newest "${gen_tie
 }
 jq -cn --arg self "${self_abi}" --arg old "${gen_old}" --arg mid "${gen_mid}" --arg new "${gen_new}" \
   --arg tie "${gen_tie}" '["latest", $self, $old, $mid, $new, $tie]' >"${MOCK_TAG_LIST}"
-refusal 'two published generations in the same second' 'same commit date' previous
-standard_tags
+tied=$(previous) || {
+  echo 'the order refused two generations sharing a commit date' >&2
+  exit 1
+}
+[[ ${tied} == "${gen_tie}"$'\t'"${tie_rev}" ]] || {
+  printf 'two generations in one second were answered as %s, not the one pushed last\n' "${tied}" >&2
+  exit 1
+}
 
-# The order the commits disagree with: a generation descending from the newest by date, published with an
-# older timestamp. Re-running an older ref overwrites nothing in the registry and would otherwise silently
-# reorder the history this record is supposed to follow.
+# The clocks disagreeing, in the first shape: a generation pushed after another one built from an older
+# commit. Re-running an older ref overwrites nothing in the registry and would otherwise silently reorder
+# the history this record is supposed to follow.
 base_rev=$(release '2026-09-10T04:00:00Z' published-later-from-an-older-ref "${gen_base}")
 desc_rev=$(release '2026-09-05T04:00:00Z' descending-but-backdated "${gen_desc}")
 git_in_repo merge-base --is-ancestor "${base_rev}" "${desc_rev}" || {
@@ -327,7 +432,19 @@ git_in_repo merge-base --is-ancestor "${base_rev}" "${desc_rev}" || {
   exit 1
 }
 jq -cn --arg base "${gen_base}" --arg desc "${gen_desc}" '[$base, $desc]' >"${MOCK_TAG_LIST}"
-refusal 'a descendant published under an older timestamp' 'descending from it' previous
+refusal 'a descendant published under an older timestamp' 'history disagree' previous
+
+# The second shape, where the dates line up and only direction says no: the generation pushed last is built
+# from a commit that the one pushed before it descends from. Publication moved backwards through history
+# while its own timestamps moved forwards, which no single clock can see.
+anc_rev=$(release '2026-09-15T04:00:00Z' ancestor-dated-later "${gen_anc}")
+post_rev=$(release '2026-09-10T04:00:00Z' descendant-dated-earlier "${gen_post}")
+git_in_repo merge-base --is-ancestor "${anc_rev}" "${post_rev}" || {
+  echo 'the ancestry scenario did not make the second generation a descendant of the first' >&2
+  exit 1
+}
+jq -cn --arg anc "${gen_anc}" --arg post "${gen_post}" '[$post, $anc]' >"${MOCK_TAG_LIST}"
+refusal 'a later publication built from an earlier commit' 'runs backwards against history' previous
 standard_tags
 
 # The list is walked to the end: two tags a page, six tags in the repository, and the generation that wins
@@ -379,4 +496,4 @@ jq --arg repository "example.com/killbus/${sdk_image}" \
 refusal 'a record naming a registry whose tags cannot be listed' \
   'tags can only be listed from ghcr.io' check_lock "${test_root}/other-host.lock"
 
-echo 'Publication order refuses to guess when the registry cannot be read to the end'
+echo 'Publication order names the generation the registry says came last, and stops on a contradiction'
