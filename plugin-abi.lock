@@ -1,6 +1,7 @@
 {
-  "schema_version": 1,
-  "abi_id": "abi-3e0c9d46dddaf6235cfe609d543222f07f8e1abf3374f0669bf703df85063885",
+  "schema_version": 2,
+  "abi_id": "abi-feccf60c9e5fb611b2fb5e71bb606943a1be39d356050eea74ffb025962a050f",
+  "recipe_id": "recipe-77e23bc347e137d9016f9f0b251bfdfc4293771eca4db3f0344ebecc9cb0fdbc",
   "abi": {
     "go": {
       "version": "1.25.0",
@@ -8,8 +9,24 @@
       "cgo_enabled": true,
       "goos": "linux",
       "targets": [
-        {"platform": "linux/amd64", "goarch": "amd64", "tuning": {"GOAMD64": "v1"}, "cc": "gcc", "cxx": "g++"},
-        {"platform": "linux/arm64", "goarch": "arm64", "tuning": {"GOARM64": "v8.0"}, "cc": "gcc", "cxx": "g++"}
+        {
+          "platform": "linux/amd64",
+          "goarch": "amd64",
+          "tuning": {
+            "GOAMD64": "v1"
+          },
+          "cc": "gcc",
+          "cxx": "g++"
+        },
+        {
+          "platform": "linux/arm64",
+          "goarch": "arm64",
+          "tuning": {
+            "GOARM64": "v8.0"
+          },
+          "cc": "gcc",
+          "cxx": "g++"
+        }
       ],
       "experiments": [],
       "environment": {
@@ -29,15 +46,28 @@
       "sdk_base": "docker.io/library/golang:1.25.0-bookworm@sha256:81dc45d05a7444ead8c92a389621fafabc8e40f8fd1a19d7e5df14e61e98bc1a",
       "runtime_base": "gcr.io/distroless/base-debian12:nonroot@sha256:7f0c72cd138b442ae0deeb69c08b1acf5525439ba251a49ad93c320a061567e5",
       "toolchains": [
-        {"goarch": "amd64", "cc": "gcc", "cc_version": "12.2.0", "linker_command": "ld", "linker": "GNU ld", "linker_version": "2.40"},
-        {"goarch": "arm64", "cc": "gcc", "cc_version": "12.2.0", "linker_command": "ld", "linker": "GNU ld", "linker_version": "2.40"}
+        {
+          "goarch": "amd64",
+          "cc": "gcc",
+          "cc_version": "12.2.0",
+          "linker_command": "ld",
+          "linker": "GNU ld",
+          "linker_version": "2.40"
+        },
+        {
+          "goarch": "arm64",
+          "cc": "gcc",
+          "cc_version": "12.2.0",
+          "linker_command": "ld",
+          "linker": "GNU ld",
+          "linker_version": "2.40"
+        }
       ]
     },
     "rulego_server": {
       "repository": "https://github.com/rulego/rulego",
       "release_version": "v1.0.0",
       "revision": "45d1a6c4e1af594d7319dd11df9fa58bd48fd0e0",
-      "module": "github.com/rulego/rulego/server",
       "go_mod_sha256": "e525b51161aed32d97e51e257efdea4c1f6ebba4b949ba58e0398588722ddff0",
       "go_sum_sha256": "db5464f62d5b2ae75a79544033912f7776c15267080171957ced4faa47595b32"
     },
@@ -54,39 +84,128 @@
     "build": {
       "host_mode": "exe",
       "plugin_mode": "plugin",
-      "host_tags": [],
-      "host_flags": ["-trimpath"],
-      "plugin_flags": ["-trimpath", "-buildvcs=false"],
+      "host_flags": [
+        "-trimpath"
+      ],
+      "plugin_flags": [
+        "-trimpath",
+        "-buildvcs=false"
+      ],
       "host_ldflags": [],
       "plugin_ldflags": [],
-      "host_workspace": "off",
-      "plugin_workspace": "generated-server-and-plugin",
-      "plugin_symbol": "Plugins"
+      "host_workspace": "off"
     }
   },
-  "release": {
-    "state": "ready",
-    "sdk_image": "rulego-plugin-sdk",
-    "runtime_image": "rulego-server",
-    "runtime_tag_suffix": "-plugin",
-    "manifest_path": "/usr/share/rulego/plugin-abi.json",
-    "ci": {"runners": {"amd64": "ubuntu-24.04", "arm64": "ubuntu-24.04-arm"}},
-    "editor_payload": {
-      "repository": "https://github.com/rulego/rulego",
-      "version": "v1.0.0",
-      "asset": {
-        "name": "rulego-server-linux-amd64.tar.gz",
-        "sha256": "c1a735950e6572ac6dbc95f578458f8d6f5d5ad8ab3c433a531e8c55c7372650"
-      }
-    },
-    "size_limits": {
-      "amd64": {
-        "sdk": {"compressed": 1500000000, "uncompressed": 3800000000},
-        "runtime": {"compressed": 35000000, "uncompressed": 80000000}
+  "distribution": {
+    "hosts": [
+      {
+        "id": "plugin",
+        "tags": [],
+        "tag_suffix": "-plugin"
       },
-      "arm64": {
-        "sdk": {"compressed": 1500000000, "uncompressed": 3800000000},
-        "runtime": {"compressed": 35000000, "uncompressed": 90000000}
+      {
+        "id": "ai-plugin",
+        "tags": [
+          "with_ai"
+        ],
+        "tag_suffix": "-ai-plugin"
+      },
+      {
+        "id": "all-plugin",
+        "tags": [
+          "with_all"
+        ],
+        "tag_suffix": "-all-plugin"
+      }
+    ],
+    "recipe": {
+      "manifest_path": "/usr/share/rulego/plugin-abi.json",
+      "editor_payload": {
+        "repository": "https://github.com/rulego/rulego",
+        "version": "v1.0.0",
+        "asset": {
+          "name": "rulego-server-linux-amd64.tar.gz",
+          "sha256": "c1a735950e6572ac6dbc95f578458f8d6f5d5ad8ab3c433a531e8c55c7372650"
+        }
+      },
+      "files": [
+        {
+          "path": "Dockerfile.plugin-sdk",
+          "sha256": "4b872b8f54c3beef991b300881bbeae32108718e62bc99e7201138162a2e6353"
+        },
+        {
+          "path": "Dockerfile.plugin-runtime",
+          "sha256": "82dbff690111f84d975895ce95431a60f4266f37662af7ca2a99d77feeb8a3d2"
+        },
+        {
+          "path": "scripts/build-plugin-host",
+          "sha256": "59ba16e9b338f029234d4a28e6bca37e5acb7e7c81dc3865e316b38b33b43ce8"
+        },
+        {
+          "path": "scripts/rulego-plugin-build",
+          "sha256": "54fe849e1c2547e1d87c5bd52a7176738752fb392a2b2419485977f1e8805ca4"
+        },
+        {
+          "path": "scripts/prepare-plugin-abi.sh",
+          "sha256": "304ec23f46d972efe617ab641be8bf0c08e52c543eec803d9f313d7ac5875c6d"
+        },
+        {
+          "path": "scripts/fetch-plugin-editor.sh",
+          "sha256": "2e7451079e0a64476114a001809623e8848cfd5a11feaf1a7e05eec721c762c3"
+        }
+      ]
+    },
+    "release": {
+      "state": "measurement",
+      "sdk_image": "rulego-plugin-sdk",
+      "runtime_image": "rulego-server",
+      "ci": {
+        "runners": {
+          "amd64": "ubuntu-24.04",
+          "arm64": "ubuntu-24.04-arm"
+        }
+      },
+      "size_limits": {
+        "amd64": {
+          "sdk": {
+            "compressed": null,
+            "uncompressed": null
+          },
+          "runtime": {
+            "plugin": {
+              "compressed": null,
+              "uncompressed": null
+            },
+            "ai-plugin": {
+              "compressed": null,
+              "uncompressed": null
+            },
+            "all-plugin": {
+              "compressed": null,
+              "uncompressed": null
+            }
+          }
+        },
+        "arm64": {
+          "sdk": {
+            "compressed": null,
+            "uncompressed": null
+          },
+          "runtime": {
+            "plugin": {
+              "compressed": null,
+              "uncompressed": null
+            },
+            "ai-plugin": {
+              "compressed": null,
+              "uncompressed": null
+            },
+            "all-plugin": {
+              "compressed": null,
+              "uncompressed": null
+            }
+          }
+        }
       }
     }
   }

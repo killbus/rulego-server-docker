@@ -380,6 +380,34 @@ publish_immutable_image_tag() {
   printf '%s@%s\n' "${target%:*}" "${existing}"
 }
 
+promote_image_alias() {
+  local alias=${1:?alias image tag is required}
+  local source=${2:?source image digest is required}
+  local expected=${source##*@}
+  local existing status
+
+  [[ ${source} =~ @sha256:[0-9a-f]{64}$ ]] || die "source image must be addressed by digest: ${source}"
+  [[ ${alias} != *@* ]] || die "alias must be a tag reference: ${alias}"
+  if existing=$(image_reference_digest "${alias}"); then
+    if [[ ${existing} == "${expected}" ]]; then
+      printf '%s@%s\n' "${alias}" "${existing}"
+      return
+    fi
+    # A previous release may already own the alias. The caller promotes only
+    # after the canonical index for this digest has been verified, so moving
+    # the alias to that digest is the intended promotion, not a conflict.
+    log "promoting alias ${alias} from ${existing} to ${expected}"
+  else
+    status=$?
+    ((status == 1)) || return "${status}"
+  fi
+
+  retry_command 4 2 docker buildx imagetools create --tag "${alias}" "${source}"
+  existing=$(image_reference_digest "${alias}") || die "alias was not promoted: ${alias}"
+  [[ ${existing} == "${expected}" ]] || die "alias digest changed during promotion: ${alias}"
+  printf '%s@%s\n' "${alias}" "${existing}"
+}
+
 retry_command() {
   local attempts=${1:?attempt count is required}
   local delay=${2:?initial delay is required}

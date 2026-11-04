@@ -36,11 +36,23 @@ assert_contains scripts/plugin-abi-build.sh 'SDK_BASE=${sdk_base}'
 assert_contains scripts/plugin-abi-build.sh '"${sdk_ref}" . "/output/sdk-probe-${arch}.so"'
 assert_contains scripts/plugin-abi-build.sh '--entrypoint /usr/local/bin/build-plugin-host'
 assert_contains scripts/plugin-abi-build.sh 'Dockerfile.plugin-runtime'
-assert_contains scripts/plugin-abi-build.sh 'staging-${packaging_revision}-${arch}${runtime_tag_suffix}'
+assert_contains scripts/plugin-abi-build.sh 'candidate-${host}'
+assert_contains scripts/plugin-abi-build.sh 'staging-${packaging_revision}-${arch}-${host}'
+assert_contains scripts/plugin-abi-build.sh '--env "HOST_TAGS=${host_tags}"'
+assert_contains scripts/plugin-abi-build.sh "jq -c '.hosts[]'"
+assert_contains scripts/plugin-abi-build.sh 'render size-limit "${arch}" sdk'
+assert_contains scripts/plugin-abi-build.sh 'render size-limit "${arch}" "${host}"'
+assert_contains scripts/plugin-abi-build.sh 'host:$host, tags:$tags'
+assert_contains scripts/plugin-abi-build.sh 'runtime:$runtime'
 assert_contains scripts/plugin-abi-build.sh 'verify-plugin-runtime.sh" load'
+assert_contains scripts/plugin-abi-build.sh 'component_expectation'
+assert_contains scripts/verify-plugin-runtime.sh 'ai/agent'
+assert_contains scripts/verify-plugin-runtime.sh 'myPlugins/upper'
 assert_contains scripts/plugin-abi-build.sh 'verify-plugin-runtime.sh" reject'
 assert_contains scripts/plugin-abi-build.sh 'verify-plugin-runtime.sh" missing-libc'
 assert_contains scripts/plugin-abi-build.sh '--provenance=mode=max --sbom=true'
+grep -Fq '"all-plugin"' plugin-abi.lock
+grep -Fq '"with_all"' plugin-abi.lock
 assert_contains scripts/verify-plugin-runtime.sh 'docker volume create "${volume}"'
 assert_contains scripts/verify-plugin-runtime.sh '--mount "type=volume,source=${volume},target=/app/data"'
 assert_contains scripts/verify-plugin-runtime.sh '--mount "type=bind,source=${work}/plugins,target=/app/data/plugins,readonly"'
@@ -54,11 +66,30 @@ if grep -R -Fq 'all(. as ' -- scripts; then
 fi
 assert_contains scripts/plugin-abi-publish.sh 'publish_immutable_image_tag'
 assert_contains scripts/lib.sh 'immutable tag already points to a different digest'
+assert_contains scripts/lib.sh 'promote_image_alias'
+assert_contains scripts/plugin-abi-publish.sh 'promote_image_alias'
 assert_contains scripts/plugin-abi-publish.sh 'verify-plugin-oci.sh'
-assert_contains scripts/plugin-abi-publish.sh 'expected_staging=${runtime_repository}:staging-${packaging_revision}-${arch}${runtime_tag_suffix}'
-assert_contains scripts/verify-plugin-oci.sh '--arg variant "${variant#plugin-}"'
+assert_contains scripts/plugin-abi-publish.sh 'expected_staging="${sdk_repository}:staging-${packaging_revision}-${arch}"'
+assert_contains scripts/plugin-abi-publish.sh 'expected_staging="${runtime_repository}:staging-${packaging_revision}-${arch}-${host}"'
+assert_contains scripts/plugin-abi-publish.sh 'staging-${packaging_revision}${suffix}'
+assert_contains scripts/plugin-abi-publish.sh 'verify-plugin-oci.sh" "${sdk_staging_index}" "${staging_index}" release "${host}"'
+assert_contains scripts/plugin-abi-publish.sh 'verify-plugin-oci.sh" "${sdk_ref}" "${canonical_ref}" release "${host}"'
+assert_contains scripts/plugin-abi-publish.sh 'published-sizes.tsv'
+assert_contains scripts/plugin-abi-publish.sh 'published-sizes-${host}.tsv'
+assert_contains scripts/plugin-abi-build.sh 'imagetools create --tag "${sdk_staging}"'
+assert_contains scripts/plugin-abi-build.sh 'inspect_native "${sdk_staging}"'
+assert_contains scripts/plugin-abi-publish.sh 'runtime:$runtime'
+assert_contains scripts/plugin-abi-publish.sh 'recipe_id:$recipe_id'
+assert_contains scripts/verify-plugin-oci.sh 'render size-limit "${arch}" "${index_host}"'
+assert_contains scripts/verify-plugin-oci.sh 'index_metadata+=("" "${index_host}")'
+assert_contains scripts/verify-plugin-oci.sh 'child_metadata+=("${index_host}")'
 assert_contains scripts/plugin-abi-build.sh 'dd of="${work}/wrong-arch.so"'
 assert_contains scripts/plugin-abi-build.sh '-gcflags=all=-N'
+
+if grep -R -Fq -e 'runtime_tag_suffix' -e 'PLUGIN_WORKSPACE' -e 'plugin_symbol' -- scripts plugin-abi.lock; then
+  echo 'removed ABI/distribution identity field remains in scripts or the lock' >&2
+  exit 1
+fi
 
 verify_workflow=.github/workflows/plugin-abi.yml
 publish_workflow=.github/workflows/plugin-abi-publish.yml
@@ -94,7 +125,7 @@ if grep -Fq 'FROM ${SDK_BASE}' Dockerfile || grep -Fq 'plugin-runtime' Dockerfil
   exit 1
 fi
 assert_contains README.md 'rulego-server:v1.0.0-plugin'
-if grep -R -Fq 'latest-plugin' -- Dockerfile.plugin-* scripts .github 2>/dev/null; then
+if grep -R -Fq 'latest-plugin' -- Dockerfile.plugin-* scripts .github plugin-abi.lock 2>/dev/null; then
   echo 'Plugin ABI stream must not define a mutable latest alias' >&2
   exit 1
 fi

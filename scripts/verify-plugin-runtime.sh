@@ -9,14 +9,29 @@ source "${script_dir}/lib.sh"
 
 require_command docker jq curl readelf sha256sum
 
+assert_probe_registered() {
+  local response=${1:?component response is required}
+  local component=${2:-}
+  jq -e '.nodes | any(.type == "myPlugins/upper")' "${response}" >/dev/null \
+    || return 1
+  case ${component} in
+    ai/agent) jq -e '.nodes | any(.type == "ai/agent")' "${response}" >/dev/null ;;
+    none) jq -e '(.nodes | any(.type == "ai/agent")) | not' "${response}" >/dev/null ;;
+    *) return 0 ;;
+  esac
+}
+
 runtime_load() {
   local expectation=${1:?load expectation is required}
   local image=${2:?runtime image is required}
   local arch=${3:?architecture is required}
   local plugin=${4:?plugin file is required}
+  local component=${5:-}
   [[ ${expectation} == load || ${expectation} == reject ]] \
     || die 'load expectation must be load or reject'
   [[ -f ${plugin} ]] || die "plugin not found: ${plugin}"
+  [[ -z ${component} ]] || [[ ${component} == ai/agent || ${component} == none ]] \
+    || die 'component expectation must be ai/agent or none'
 
   local work container volume port response process_pid process_uid process_gid
   mkdir -p "${repository_root}/tmp"
@@ -46,8 +61,8 @@ runtime_load() {
   [[ ${process_uid} == 65532 && ${process_gid} == 65532 ]] || die 'runtime process identity is not UID/GID 65532:65532'
 
   if [[ ${expectation} == load ]]; then
-    jq -e '.nodes | any(.type == "myPlugins/upper")' "${response}" >/dev/null \
-      || { docker logs "${container}" >&2; die 'ABI probe did not register'; }
+    assert_probe_registered "${response}" "${component}" \
+      || { docker logs "${container}" >&2; die 'ABI probe or component expectation was not met'; }
     if docker logs "${container}" 2>&1 | grep -Eqi 'load plugin=.*error='; then
       die 'runtime logged a plugin load error for the ABI probe'
     fi
@@ -61,8 +76,8 @@ runtime_load() {
       if curl --fail --silent "http://127.0.0.1:${port}/api/v1/components" >"${response}"; then break; fi
       sleep 0.2
     done
-    jq -e '.nodes | any(.type == "myPlugins/upper")' "${response}" >/dev/null \
-      || { docker logs "${container}" >&2; die 'ABI probe did not register after runtime restart'; }
+    assert_probe_registered "${response}" "${component}" \
+      || { docker logs "${container}" >&2; die 'ABI probe or component expectation was not met after runtime restart'; }
   else
     jq -e '(.nodes | any(.type == "myPlugins/upper")) | not' "${response}" >/dev/null \
       || die 'incompatible ABI probe unexpectedly registered'
@@ -147,12 +162,12 @@ missing_libc() {
 
 case ${1:-} in
   load)
-    [[ $# == 4 ]] || die 'usage: verify-plugin-runtime.sh load <image> <arch> <plugin>'
-    runtime_load load "$2" "$3" "$4"
+    [[ $# == 4 || $# == 5 ]] || die 'usage: verify-plugin-runtime.sh load <image> <arch> <plugin> [ai/agent|none]'
+    runtime_load load "$2" "$3" "$4" "${5:-}"
     ;;
   reject)
     [[ $# == 4 ]] || die 'usage: verify-plugin-runtime.sh reject <image> <arch> <plugin>'
-    runtime_load reject "$2" "$3" "$4"
+    runtime_load reject "$2" "$3" "$4" ''
     ;;
   filesystem)
     [[ $# == 3 ]] || die 'usage: verify-plugin-runtime.sh filesystem <image> <arch>'

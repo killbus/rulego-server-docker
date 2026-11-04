@@ -13,8 +13,14 @@ printf '<html>editor</html>\n' >"${test_root}/payload/editor/index.html"
 printf 'not copied\n' >"${test_root}/payload/rulego-server-linux-amd64"
 tar -C "${test_root}/payload" -czf "${test_root}/editor.tar.gz" editor rulego-server-linux-amd64
 archive_sha=$(sha256sum "${test_root}/editor.tar.gz" | awk '{print $1}')
-jq --arg sha "${archive_sha}" '.release.editor_payload.asset.sha256 = $sha' \
-  plugin-abi.lock >"${test_root}/lock.json"
+jq --arg sha "${archive_sha}" '.distribution.recipe.editor_payload.asset.sha256 = $sha' \
+  plugin-abi.lock >"${test_root}/lock-mutated.json"
+# The editor payload is part of the distribution recipe, so changing it changes
+# recipe_id; re-sign it the same way scripts/plugin-abi.sh derives the identity.
+recipe_id="recipe-$(jq -S -c '.distribution.recipe' "${test_root}/lock-mutated.json" \
+  | tr -d '\r' | sha256sum | awk '{print $1}')"
+jq --arg id "${recipe_id}" '.recipe_id = $id' \
+  "${test_root}/lock-mutated.json" >"${test_root}/lock.json"
 
 cat >"${test_root}/bin/curl" <<'EOF'
 #!/usr/bin/env bash

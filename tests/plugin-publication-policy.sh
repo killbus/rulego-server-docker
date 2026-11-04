@@ -13,6 +13,7 @@ trap 'rm -rf -- "${test_root}"' EXIT
 expected=sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 other=sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
 target=registry.example:5000/rulego-server:abi-test-plugin
+alias=registry.example:5000/rulego-server:v1.0.0-plugin
 source_ref=registry.example:5000/rulego-server@${expected}
 state=${test_root}/published
 docker_log=${test_root}/docker.log
@@ -25,6 +26,10 @@ image_reference_digest() {
       [[ -f ${state} ]] || return 1
       printf '%s\n' "${expected}"
       ;;
+    promoted)
+      if [[ -f ${state} ]]; then printf '%s\n' "${expected}"; else printf '%s\n' "${other}"; fi
+      ;;
+    sticky-mismatch) printf '%s\n' "${other}" ;;
     error) return 2 ;;
   esac
 }
@@ -76,6 +81,57 @@ for mode in mismatched error; do
   fi
 done
 
+# The alias is mutable: a matching digest is a no-op, an absent alias is
+# created once, and a stale alias is moved to the already-verified canonical
+# digest exactly once.
+MOCK_TAG_STATE=matching
+rm -f -- "${state}" "${docker_log}"
+result=$(promote_image_alias "${alias}" "${source_ref}")
+[[ ${result} == "${alias}@${expected}" && ! -e ${docker_log} ]]
+
+MOCK_TAG_STATE=absent
+rm -f -- "${state}" "${docker_log}"
+result=$(promote_image_alias "${alias}" "${source_ref}")
+[[ ${result} == "${alias}@${expected}" ]]
+[[ $(wc -l <"${docker_log}") == 1 ]]
+
+MOCK_TAG_STATE=promoted
+rm -f -- "${state}" "${docker_log}"
+result=$(promote_image_alias "${alias}" "${source_ref}" 2>"${test_root}/stderr")
+[[ ${result} == "${alias}@${expected}" ]]
+[[ $(wc -l <"${docker_log}") == 1 ]]
+grep -Fq 'promoting alias' "${test_root}/stderr"
+
+MOCK_TAG_STATE=sticky-mismatch
+rm -f -- "${state}" "${docker_log}"
+if (promote_image_alias "${alias}" "${source_ref}") >"${test_root}/stdout" 2>"${test_root}/stderr"; then
+  echo 'expected alias read-back mismatch failure' >&2
+  exit 1
+fi
+[[ $(wc -l <"${docker_log}") == 1 ]]
+grep -Fq 'alias digest changed during promotion' "${test_root}/stderr"
+
+MOCK_TAG_STATE=error
+rm -f -- "${state}" "${docker_log}"
+if (promote_image_alias "${alias}" "${source_ref}") >"${test_root}/stdout" 2>"${test_root}/stderr"; then
+  echo 'expected alias lookup error to propagate' >&2
+  exit 1
+fi
+[[ ! -e ${docker_log} ]]
+
+MOCK_TAG_STATE=matching
+if (promote_image_alias "${alias}@${expected}" "${source_ref}") >"${test_root}/stdout" 2>"${test_root}/stderr"; then
+  echo 'expected a digest alias to be rejected' >&2
+  exit 1
+fi
+grep -Fq 'alias must be a tag reference' "${test_root}/stderr"
+
+if (promote_image_alias "${alias}" "${alias}") >"${test_root}/stdout" 2>"${test_root}/stderr"; then
+  echo 'expected a tag source to be rejected' >&2
+  exit 1
+fi
+grep -Fq 'source image must be addressed by digest' "${test_root}/stderr"
+
 MOCK_INDEX_STATE=complete
 export MOCK_INDEX_STATE
 verify_exact_image_children test@index "${expected}" "${other}" "${test_root}/index.json"
@@ -85,4 +141,4 @@ if verify_exact_image_children test@index "${expected}" "${other}" "${test_root}
   exit 1
 fi
 
-echo 'Plugin publication immutability and platform policy passed'
+echo 'Plugin publication immutability, alias promotion, and platform policy passed'

@@ -12,12 +12,12 @@ lock=${PLUGIN_ABI_LOCK:-${repository_root}/plugin-abi.lock}
 usage() {
   cat >&2 <<'EOF'
 usage: scripts/plugin-abi.sh validate <--candidate|--release>
-       scripts/plugin-abi.sh render <id|lock-digest|manifest|matrix|ci|editor>
+       scripts/plugin-abi.sh render <id|recipe-id|lock-digest|manifest|matrix|ci|editor>
        scripts/plugin-abi.sh render build <amd64|arm64>
        scripts/plugin-abi.sh render sdk-env <amd64|arm64>
-       scripts/plugin-abi.sh render size-limit <amd64|arm64>
-       scripts/plugin-abi.sh render metadata <plugin-sdk|plugin-runtime> [amd64|arm64]
-       scripts/plugin-abi.sh render tags
+       scripts/plugin-abi.sh render size-limit <amd64|arm64> <sdk|host-id>
+       scripts/plugin-abi.sh render metadata <plugin-sdk|plugin-runtime> [amd64|arm64] [host-id]
+       scripts/plugin-abi.sh render tags <rev12>
 EOF
   exit 2
 }
@@ -32,6 +32,14 @@ calculated_abi_id() {
   printf 'abi-%s\n' "$(canonical_abi | sha256sum | awk '{print $1}')"
 }
 
+canonical_recipe() {
+  jq -S -c '.distribution.recipe' "${lock}" | tr -d '\r'
+}
+
+calculated_recipe_id() {
+  printf 'recipe-%s\n' "$(canonical_recipe | sha256sum | awk '{print $1}')"
+}
+
 canonical_manifest() {
   jq -S -c . "${lock}" | tr -d '\r'
 }
@@ -43,7 +51,7 @@ lock_digest() {
 validate_lock() {
   local mode=${1:?validation mode is required}
   [[ ${mode} == --candidate || ${mode} == --release ]] || usage
-  require_command jq sha256sum
+  require_command jq sha256sum awk
   [[ -f ${lock} ]] || die "Plugin ABI lock not found: ${lock}"
   jq -e . "${lock}" >/dev/null || die 'Plugin ABI lock is not valid JSON'
 
@@ -54,12 +62,17 @@ validate_lock() {
     def revision: type == "string" and test("^[0-9a-f]{40}$");
     def pinned_image: type == "string" and test("^[^[:space:]@]+(:[^@[:space:]]+)?@sha256:[0-9a-f]{64}$");
     def no_placeholder: [paths(scalars) as $p | getpath($p) | select(type == "string") | select(test("<[^>]+>|REPLACE|TODO|PENDING"; "i"))] | length == 0;
+    def host_ids($root): [$root.distribution.hosts[].id];
 
     . as $root |
-    exact_keys(["schema_version", "abi_id", "abi", "release"]) and
-    .schema_version == 1 and
+    (host_ids($root)) as $hosts |
+
+    exact_keys(["schema_version", "abi_id", "recipe_id", "abi", "distribution"]) and
+    .schema_version == 2 and
     (.abi_id | test("^abi-[0-9a-f]{64}$")) and
+    (.recipe_id | test("^recipe-[0-9a-f]{64}$")) and
     no_placeholder and
+
     (.abi | exact_keys(["go", "native", "rulego_server", "rulego_core", "module_graph", "build"])) and
     (.abi.go | exact_keys(["version", "compiler", "cgo_enabled", "goos", "targets", "experiments", "environment"])) and
     (.abi.go.version | test("^[0-9]+\\.[0-9]+\\.[0-9]+$")) and
@@ -72,7 +85,6 @@ validate_lock() {
     (.abi.go.targets | length == 2) and
     [.abi.go.targets[].goarch] == ["amd64", "arm64"] and
     [.abi.go.targets[].platform] == ["linux/amd64", "linux/arm64"] and
-    ([.abi.go.targets[].goarch] | unique | length == 2) and
     ([.abi.go.targets[] | exact_keys(["platform", "goarch", "tuning", "cc", "cxx"])] | all) and
     .abi.go.targets[0].tuning == {"GOAMD64":"v1"} and
     .abi.go.targets[1].tuning == {"GOARM64":"v8.0"} and
@@ -86,10 +98,10 @@ validate_lock() {
     ([.abi.native.toolchains[] | exact_keys(["goarch", "cc", "cc_version", "linker_command", "linker", "linker_version"])] | all) and
     ([.abi.native.toolchains[] | .cc, .cc_version, .linker_command, .linker, .linker_version] | all(nonempty)) and
     ([range(0; 2) as $i | .abi.native.toolchains[$i].cc == .abi.go.targets[$i].cc] | all) and
-    (.abi.rulego_server | exact_keys(["repository", "release_version", "revision", "module", "go_mod_sha256", "go_sum_sha256"])) and
+    (.abi.rulego_server | exact_keys(["repository", "release_version", "revision", "go_mod_sha256", "go_sum_sha256"])) and
     (.abi.rulego_server.repository | test("^https://github\\.com/[^/]+/[^/]+$")) and
     (.abi.rulego_server.release_version | test("^v[0-9]+\\.[0-9]+\\.[0-9]+$")) and
-    (.abi.rulego_server.revision | revision) and (.abi.rulego_server.module | nonempty) and
+    (.abi.rulego_server.revision | revision) and
     (.abi.rulego_server.go_mod_sha256 | sha256) and (.abi.rulego_server.go_sum_sha256 | sha256) and
     (.abi.rulego_core | exact_keys(["module", "version", "revision"])) and
     (.abi.rulego_core.module | nonempty) and (.abi.rulego_core.version | nonempty) and
@@ -99,48 +111,77 @@ validate_lock() {
     (.abi.module_graph | exact_keys(["list_sha256", "graph_sha256", "replacements"])) and
     (.abi.module_graph.list_sha256 | sha256) and (.abi.module_graph.graph_sha256 | sha256) and
     .abi.module_graph.replacements == [] and
-    (.abi.build | exact_keys(["host_mode", "plugin_mode", "host_tags", "host_flags", "plugin_flags", "host_ldflags", "plugin_ldflags", "host_workspace", "plugin_workspace", "plugin_symbol"])) and
+    (.abi.build | exact_keys(["host_mode", "plugin_mode", "host_flags", "plugin_flags", "host_ldflags", "plugin_ldflags", "host_workspace"])) and
     .abi.build.host_mode == "exe" and .abi.build.plugin_mode == "plugin" and
-    .abi.build.host_tags == [] and .abi.build.host_flags == ["-trimpath"] and
+    .abi.build.host_flags == ["-trimpath"] and
     .abi.build.plugin_flags == ["-trimpath", "-buildvcs=false"] and .abi.build.host_ldflags == [] and
     .abi.build.plugin_ldflags == [] and .abi.build.host_workspace == "off" and
-    .abi.build.plugin_workspace == "generated-server-and-plugin" and .abi.build.plugin_symbol == "Plugins" and
-    (.release | exact_keys(["state", "sdk_image", "runtime_image", "runtime_tag_suffix", "manifest_path", "ci", "editor_payload", "size_limits"])) and
-    (.release.state == "measurement" or .release.state == "ready") and
-    ([.release.sdk_image, .release.runtime_image] | all(test("^[a-z0-9]+([._-][a-z0-9]+)*$"))) and
-    (.release.runtime_tag_suffix | test("^-[a-z0-9]+([._-][a-z0-9]+)*$")) and
-    (.release.manifest_path | startswith("/") and endswith(".json")) and
-    (.release.ci | exact_keys(["runners"])) and
-    (.release.ci.runners | exact_keys(["amd64", "arm64"])) and
-    ([.release.ci.runners.amd64, .release.ci.runners.arm64] | all(nonempty)) and
-    (.release.editor_payload | exact_keys(["repository", "version", "asset"])) and
-    .release.editor_payload.repository == $root.abi.rulego_server.repository and
-    .release.editor_payload.version == $root.abi.rulego_server.release_version and
-    (.release.editor_payload.asset | exact_keys(["name", "sha256"])) and
-    (.release.editor_payload.asset.name | test("^[A-Za-z0-9._-]+\\.tar\\.gz$")) and
-    (.release.editor_payload.asset.sha256 | sha256) and
-    (.release.size_limits | exact_keys(["amd64", "arm64"])) and
-    ([.release.size_limits[] | exact_keys(["sdk", "runtime"])] | all) and
-    ([.release.size_limits[] | (.sdk, .runtime) | exact_keys(["compressed", "uncompressed"])] | all)
+
+    (.distribution | exact_keys(["hosts", "recipe", "release"])) and
+    (.distribution.hosts | length == 3) and
+    [.distribution.hosts[].id] == ["plugin", "ai-plugin", "all-plugin"] and
+    [.distribution.hosts[].tag_suffix] == ["-plugin", "-ai-plugin", "-all-plugin"] and
+    [.distribution.hosts[].tags] == [[], ["with_ai"], ["with_all"]] and
+    ([.distribution.hosts[] | exact_keys(["id", "tags", "tag_suffix"])] | all) and
+    ([.distribution.hosts[].tags | all(. == "with_ai" or . == "with_all")] | all) and
+    ([.distribution.hosts[].id | nonempty] | all) and
+    ([.distribution.hosts[].tag_suffix | test("^-[a-z0-9]+([._-][a-z0-9]+)*$")] | all) and
+
+    (.distribution.recipe | exact_keys(["manifest_path", "editor_payload", "files"])) and
+    (.distribution.recipe.manifest_path | startswith("/") and endswith(".json")) and
+    (.distribution.recipe.editor_payload | exact_keys(["repository", "version", "asset"])) and
+    .distribution.recipe.editor_payload.repository == $root.abi.rulego_server.repository and
+    .distribution.recipe.editor_payload.version == $root.abi.rulego_server.release_version and
+    (.distribution.recipe.editor_payload.asset | exact_keys(["name", "sha256"])) and
+    (.distribution.recipe.editor_payload.asset.name | test("^[A-Za-z0-9._-]+\\.tar\\.gz$")) and
+    (.distribution.recipe.editor_payload.asset.sha256 | sha256) and
+    (.distribution.recipe.files | type == "array" and length > 0) and
+    ([.distribution.recipe.files[] | exact_keys(["path", "sha256"])] | all) and
+    ([.distribution.recipe.files[].path | test("^[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)*$")] | all) and
+    ([.distribution.recipe.files[].sha256 | sha256] | all) and
+    ([.distribution.recipe.files[].path] | length == (unique | length)) and
+
+    (.distribution.release | exact_keys(["state", "sdk_image", "runtime_image", "ci", "size_limits"])) and
+    (.distribution.release.state == "measurement" or .distribution.release.state == "ready") and
+    ([.distribution.release.sdk_image, .distribution.release.runtime_image] | all(test("^[a-z0-9]+([._-][a-z0-9]+)*$"))) and
+    (.distribution.release.ci | exact_keys(["runners"])) and
+    (.distribution.release.ci.runners | exact_keys(["amd64", "arm64"])) and
+    ([.distribution.release.ci.runners.amd64, .distribution.release.ci.runners.arm64] | all(nonempty)) and
+    (.distribution.release.size_limits | exact_keys(["amd64", "arm64"])) and
+    ([.distribution.release.size_limits[] | exact_keys(["sdk", "runtime"])] | all) and
+    ([.distribution.release.size_limits[] | .sdk | exact_keys(["compressed", "uncompressed"])] | all) and
+    ([.distribution.release.size_limits[] | .runtime | exact_keys($hosts)] | all) and
+    ([.distribution.release.size_limits[] | .runtime[] | exact_keys(["compressed", "uncompressed"])] | all)
   ' "${lock}" >/dev/null || die 'Plugin ABI lock schema or values are invalid'
 
-  local expected actual state
+  local expected actual recipe_path recipe_sha
   expected=$(calculated_abi_id)
   actual=$(jq -er '.abi_id' "${lock}")
   [[ ${actual} == "${expected}" ]] || die "stale abi_id: expected ${expected}, found ${actual}"
 
-  state=$(jq -er '.release.state' "${lock}")
+  expected=$(calculated_recipe_id)
+  actual=$(jq -er '.recipe_id' "${lock}")
+  [[ ${actual} == "${expected}" ]] || die "stale recipe_id: expected ${expected}, found ${actual}"
+
+  while IFS=$'\t' read -r recipe_path recipe_sha; do
+    [[ -f ${repository_root}/${recipe_path} ]] || die "recipe file is missing: ${recipe_path}"
+    [[ $(sha256_file "${repository_root}/${recipe_path}") == "${recipe_sha}" ]] \
+      || die "recipe file digest mismatch: ${recipe_path}"
+  done < <(jq -r '.distribution.recipe.files[] | [.path, .sha256] | @tsv' "${lock}")
+
+  local state
+  state=$(jq -er '.distribution.release.state' "${lock}")
   if [[ ${mode} == --candidate ]]; then
     if [[ ${state} == measurement ]]; then
-      jq -e '[.release.size_limits[][][]] | all(. == null)' "${lock}" >/dev/null \
+      jq -e '[.distribution.release.size_limits | .. | scalars] | all(. == null)' "${lock}" >/dev/null \
         || die 'measurement state permits only null size ceilings'
     else
-      jq -e '[.release.size_limits[][][]] | all(type == "number" and (floor == .) and . > 0)' "${lock}" >/dev/null \
+      jq -e '[.distribution.release.size_limits | .. | scalars] | all(type == "number" and (floor == .) and . > 0)' "${lock}" >/dev/null \
         || die 'ready state requires positive integer size ceilings'
     fi
   else
     [[ ${state} == ready ]] || die 'release validation requires release.state=ready'
-    jq -e '[.release.size_limits[][][]] | all(type == "number" and (floor == .) and . > 0)' "${lock}" >/dev/null \
+    jq -e '[.distribution.release.size_limits | .. | scalars] | all(type == "number" and (floor == .) and . > 0)' "${lock}" >/dev/null \
       || die 'release validation requires positive integer size ceilings'
   fi
 }
@@ -148,7 +189,7 @@ validate_lock() {
 render_matrix() {
   jq -c '{include: [.abi.go.targets[] as $target | {
     goarch: $target.goarch, platform: $target.platform,
-    runner: .release.ci.runners[$target.goarch],
+    runner: .distribution.release.ci.runners[$target.goarch],
     tuning_key: ($target.tuning | keys[0]),
     tuning_value: ($target.tuning | .[keys[0]])
   }]}' "${lock}"
@@ -156,18 +197,20 @@ render_matrix() {
 
 render_ci() {
   jq -c --arg lock_digest "$(lock_digest)" '{
-    abi_id, lock_digest: $lock_digest, go_version: .abi.go.version,
+    abi_id, recipe_id, lock_digest: $lock_digest, go_version: .abi.go.version,
     libc_minimum: .abi.native.minimum_version,
     sdk_base: .abi.native.sdk_base, runtime_base: .abi.native.runtime_base,
     server_repository: .abi.rulego_server.repository,
     server_release: .abi.rulego_server.release_version,
     server_revision: .abi.rulego_server.revision,
-    manifest_path: .release.manifest_path, release_state: .release.state,
-    sdk_image: .release.sdk_image, runtime_image: .release.runtime_image,
-    runtime_tag_suffix: .release.runtime_tag_suffix,
+    manifest_path: .distribution.recipe.manifest_path,
+    release_state: .distribution.release.state,
+    sdk_image: .distribution.release.sdk_image,
+    runtime_image: .distribution.release.runtime_image,
+    hosts: .distribution.hosts,
     matrix: {include: [.abi.go.targets[] as $target | {
       goarch: $target.goarch, platform: $target.platform,
-      runner: .release.ci.runners[$target.goarch],
+      runner: .distribution.release.ci.runners[$target.goarch],
       tuning_key: ($target.tuning | keys[0]),
       tuning_value: ($target.tuning | .[keys[0]])
     }]}
@@ -175,7 +218,7 @@ render_ci() {
 }
 
 render_editor() {
-  jq -c '.release.editor_payload' "${lock}"
+  jq -c '.distribution.recipe.editor_payload' "${lock}"
 }
 
 render_build() {
@@ -184,8 +227,8 @@ render_build() {
     (.abi.go.targets[] | select(.goarch == $arch)) as $target |
     (.abi.native.toolchains[] | select(.goarch == $arch)) as $toolchain |
     {
-      abi_id, lock_digest: $lock_digest,
-      manifest_path: .release.manifest_path,
+      abi_id, recipe_id, lock_digest: $lock_digest,
+      manifest_path: .distribution.recipe.manifest_path,
       go: (.abi.go | del(.targets)), target: $target,
       native: (.abi.native | del(.toolchains)), toolchain: $toolchain,
       rulego_server: .abi.rulego_server, rulego_core: .abi.rulego_core,
@@ -203,6 +246,7 @@ render_sdk_env() {
   done < <(jq -r '
     [
       ["ABI_ID", .abi_id],
+      ["RECIPE_ID", .recipe_id],
       ["LOCK_DIGEST", .lock_digest],
       ["GO_VERSION", .go.version],
       ["GOOS", .go.goos],
@@ -224,38 +268,52 @@ render_sdk_env() {
       ["LINKER_COMMAND", .toolchain.linker_command],
       ["LINKER_IDENTITY", .toolchain.linker],
       ["LINKER_VERSION", .toolchain.linker_version],
-      ["SERVER_REVISION", .rulego_server.revision],
       ["SERVER_GO_MOD_SHA256", .rulego_server.go_mod_sha256],
       ["SERVER_GO_SUM_SHA256", .rulego_server.go_sum_sha256],
       ["CORE_MODULE", .rulego_core.module],
       ["CORE_VERSION", .rulego_core.version],
       ["HOST_MODE", .build.host_mode],
       ["PLUGIN_MODE", .build.plugin_mode],
-      ["HOST_TAGS", (.build.host_tags | join(","))],
       ["HOST_FLAGS", (.build.host_flags | join(" "))],
       ["HOST_LDFLAGS", (.build.host_ldflags | join(" "))],
       ["HOST_WORKSPACE", .build.host_workspace],
       ["PLUGIN_FLAGS", (.build.plugin_flags | join(" "))],
-      ["PLUGIN_LDFLAGS", (.build.plugin_ldflags | join(" "))],
-      ["PLUGIN_WORKSPACE", .build.plugin_workspace]
+      ["PLUGIN_LDFLAGS", (.build.plugin_ldflags | join(" "))]
     ][] | @tsv
-  # tr -d '\r' keeps emitted values identical to the CI (LF) output: the Windows
-  # jq build ends every line with CR, and read would otherwise fold that CR into
-  # $value, where printf %q escapes it into a literal "\r" in the env file.
+  # tr strips an emitter-added carriage return so emitted values match the CI
+  # (LF) output: the Windows jq build ends every line with CR, and read would
+  # otherwise fold that CR into $value, where printf %q escapes it into a
+  # literal carriage return in the env file.
   ' <<<"${build_json}" | tr -d '\r')
 }
 
 render_metadata() {
   local variant=${1:?image variant is required}
   local arch=${2:-}
+  local host=${3:-}
   [[ ${variant} == plugin-sdk || ${variant} == plugin-runtime ]] || die "unknown image variant: ${variant}"
   if [[ -n ${arch} ]]; then
     jq -e --arg arch "${arch}" '.abi.go.targets | any(.goarch == $arch)' "${lock}" >/dev/null \
       || die "unsupported architecture: ${arch}"
   fi
-  jq -c --arg lock_digest "$(lock_digest)" --arg variant "${variant}" --arg arch "${arch}" '
+
+  local host_suffix='' host_tags=''
+  if [[ ${variant} == plugin-runtime ]]; then
+    [[ -n ${host} ]] || die 'plugin-runtime metadata requires a host id'
+    host_suffix=$(jq -er --arg host "${host}" '.distribution.hosts[] | select(.id == $host) | .tag_suffix' "${lock}") \
+      || die "unknown host: ${host}"
+    host_tags=$(jq -er --arg host "${host}" '.distribution.hosts[] | select(.id == $host) | .tags | join(",")' "${lock}") \
+      || die "unknown host: ${host}"
+  else
+    [[ -z ${host} ]] || die 'plugin-sdk metadata takes no host id'
+  fi
+
+  jq -c --arg lock_digest "$(lock_digest)" --arg variant "${variant}" \
+    --arg arch "${arch}" --arg host "${host}" --arg host_suffix "${host_suffix}" \
+    --arg host_tags "${host_tags}" '
     {
       "io.rulego.abi.id": .abi_id,
+      "io.rulego.recipe.id": .recipe_id,
       "io.rulego.abi.lock.digest": $lock_digest,
       "io.rulego.image.variant": $variant,
       "io.rulego.server.release": .abi.rulego_server.release_version,
@@ -265,8 +323,12 @@ render_metadata() {
       "io.rulego.go.version": .abi.go.version,
       "io.rulego.libc.family": .abi.native.libc,
       "io.rulego.libc.minimum": .abi.native.minimum_version,
-      "org.opencontainers.image.version": (if $variant == "plugin-sdk" then .abi_id else .abi.rulego_server.release_version + .release.runtime_tag_suffix end)
-    } + if $arch == "" then
+      "org.opencontainers.image.version": (if $variant == "plugin-sdk" then .abi_id else .abi.rulego_server.release_version + $host_suffix end)
+    }
+    + if $variant == "plugin-runtime" then
+      {"io.rulego.host": $host, "io.rulego.host.tags": $host_tags}
+    else {} end
+    + if $arch == "" then
       {"io.rulego.abi.platforms": ([.abi.go.targets[].platform] | join(","))}
     else
       {"io.rulego.abi.platform": (.abi.go.targets[] | select(.goarch == $arch) | .platform)}
@@ -274,12 +336,39 @@ render_metadata() {
   ' "${lock}"
 }
 
+render_size_limit() {
+  local arch=${1:?size-limit architecture is required}
+  local variant=${2:?size-limit variant is required}
+  jq -ec --arg arch "${arch}" --arg variant "${variant}" '
+    .distribution.release.size_limits[$arch] as $limits |
+    if $limits == null then error("unsupported size-limit architecture: \($arch)")
+    elif $variant == "sdk" then
+      (if ($limits | has("sdk")) then $limits.sdk else error("unsupported size-limit variant: \($variant)") end)
+    else
+      (if ($limits.runtime | has($variant)) then $limits.runtime[$variant] else error("unsupported size-limit variant: \($variant)") end)
+    end
+  ' "${lock}"
+}
+
 render_tags() {
+  local rev12=${1:?release revision prefix is required}
+  [[ ${rev12} =~ ^[0-9a-f]{12}$ ]] || die "revision prefix must be 12 lowercase hex characters: ${rev12}"
   validate_lock --release
-  jq -c '{
-    sdk: (.release.sdk_image + ":" + .abi_id),
-    runtime: (.release.runtime_image + ":" + .abi.rulego_server.release_version + .release.runtime_tag_suffix)
-  }' "${lock}"
+  local recipe_tag
+  recipe_tag=$(jq -er '.recipe_id | sub("^recipe-"; "") | .[0:12]' "${lock}")
+  jq -c --arg rev "${rev12}" --arg recipe_tag "${recipe_tag}" '
+    . as $root |
+    {
+      sdk: ($root.distribution.release.sdk_image + ":" + $root.abi_id + "-r" + $recipe_tag),
+      runtime: [$root.distribution.hosts[] | {
+        host: .id,
+        canonical: ($root.distribution.release.runtime_image + ":" +
+          $root.abi.rulego_server.release_version + .tag_suffix + "-r" + $recipe_tag + "-" + $rev),
+        alias: ($root.distribution.release.runtime_image + ":" +
+          $root.abi.rulego_server.release_version + .tag_suffix)
+      }]
+    }
+  ' "${lock}"
 }
 
 case ${1:-} in
@@ -290,6 +379,7 @@ case ${1:-} in
   render)
     case ${2:-} in
       id) [[ $# == 2 ]] || usage; validate_lock --candidate; jq -er '.abi_id' "${lock}" ;;
+      recipe-id) [[ $# == 2 ]] || usage; validate_lock --candidate; jq -er '.recipe_id' "${lock}" ;;
       lock-digest) [[ $# == 2 ]] || usage; validate_lock --candidate; lock_digest ;;
       manifest) [[ $# == 2 ]] || usage; validate_lock --candidate; canonical_manifest ;;
       matrix) [[ $# == 2 ]] || usage; validate_lock --candidate; render_matrix ;;
@@ -297,13 +387,9 @@ case ${1:-} in
       editor) [[ $# == 2 ]] || usage; validate_lock --candidate; render_editor ;;
       build) [[ $# == 3 ]] || usage; validate_lock --candidate; render_build "$3" ;;
       sdk-env) [[ $# == 3 ]] || usage; validate_lock --candidate; render_sdk_env "$3" ;;
-      size-limit)
-        [[ $# == 3 ]] || usage
-        validate_lock --candidate
-        jq -ec --arg arch "$3" '.release.size_limits[$arch] // error("unsupported size-limit architecture")' "${lock}"
-        ;;
-      metadata) [[ $# == 3 || $# == 4 ]] || usage; validate_lock --candidate; render_metadata "$3" "${4:-}" ;;
-      tags) [[ $# == 2 ]] || usage; render_tags ;;
+      size-limit) [[ $# == 4 ]] || usage; validate_lock --candidate; render_size_limit "$3" "$4" ;;
+      metadata) [[ $# == 3 || $# == 4 || $# == 5 ]] || usage; validate_lock --candidate; render_metadata "$3" "${4:-}" "${5:-}" ;;
+      tags) [[ $# == 3 ]] || usage; render_tags "$3" ;;
       *) usage ;;
     esac
     ;;

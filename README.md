@@ -3,8 +3,9 @@
 This repository packages the official, CI-built [RuleGo](https://github.com/rulego/rulego)
 server release binaries as small, non-root multi-platform container images.
 Those standard and all-components images never rebuild RuleGo from source. A
-separate Plugin ABI stream builds a lock-pinned, plugin-capable host and SDK;
-it never feeds its source-built bytes into the standard or all tags.
+separate Plugin ABI stream builds a lock-pinned SDK and three peer
+plugin-capable hosts over one ABI; it never feeds its source-built bytes into
+the standard or all tags.
 
 ## Usage
 
@@ -36,13 +37,29 @@ The image runs as UID/GID `65532:65532`, exposes TCP port 9090, uses
 [`plugin-abi.lock`](plugin-abi.lock) is the host distributor's single machine
 authority for the Plugin ABI. It owns the exact Go and native toolchains,
 Linux targets, glibc floor, RuleGo Server and Core revisions, module graph,
-build inputs, image names, and release policy. The current
-contract uses Go 1.25.0, `CGO_ENABLED=1`, glibc 2.34 or newer, RuleGo Server
-release `v1.0.0` at source revision
-`45d1a6c4e1af594d7319dd11df9fa58bd48fd0e0`, and RuleGo Core
-`v1.0.0`. The source revision is the commit
-peeled from that formal release tag; the ABI ID additionally identifies the
-complete build contract, while an OCI digest identifies the resulting image.
+build inputs, the distribution hosts and recipe, image names, and release
+policy. The current contract uses Go 1.25.0, `CGO_ENABLED=1`, glibc 2.34 or
+newer, RuleGo Server release `v1.0.0` at source revision
+`45d1a6c4e1af594d7319dd11df9fa58bd48fd0e0`, and RuleGo Core `v1.0.0`. The
+source revision is the commit peeled from that formal release tag.
+
+### Two identities
+
+The lock records two independent, content-addressed identities, and neither is
+written by hand:
+
+| Identity | Formula | Covers |
+| --- | --- | --- |
+| `abi_id` | `abi-<sha256(canonical .abi)>` | the `plugin.Open` equivalence class |
+| `recipe_id` | `recipe-<sha256(canonical .distribution.recipe)>` | the byte-production inputs |
+
+`abi_id` identifies the Go toolchain, targets, libc floor, host/core revisions,
+module graph, and build flags that decide whether a `.so` can be opened by a
+host. It is sound (the same id means the same ABI inputs) and minimal: hosts,
+tags, image names, release policy, and recipe files are distribution concerns,
+so changing them never moves `abi_id`. `recipe_id` covers the Dockerfiles, build
+scripts, editor payload, and manifest path; `r<recipe12>` in the tags below is
+the first 12 hex characters of `recipe_id`.
 
 The ownership chain is:
 
@@ -51,19 +68,46 @@ host distributor -> plugin-abi.lock -> SDK image digest -> plugin .so + ABI side
                                   \-> runtime image digest -> loads the external .so
 ```
 
-The SDK discovery tag is `rulego-plugin-sdk:<abi_id>`. The plugin-capable
-server is the `plugin` variant of the formal host release and uses
-`rulego-server:v1.0.0-plugin`. Consumers execute the OCI digests recorded in
-the workflow's `plugin-abi-release.json`; canonical tags are first-writer
-immutable and there is no moving `latest-plugin` alias.
+### Three peer hosts over one ABI and one SDK
+
+All three hosts share the single SDK build and the single `abi_id`; they differ
+only in the build tags compiled into the runtime:
+
+| Host | Build tags | Optional components |
+| --- | --- | --- |
+| `plugin` | none | none |
+| `ai-plugin` | `with_ai` | AI/agent components |
+| `all-plugin` | `with_all` | union of all optional components |
+
+`with_all` is the upstream union build tag, so `all-plugin` costs one extra
+runtime build per architecture. It does not create a second SDK, a second ABI
+identity, or a second compatibility check.
+
+### Tags
+
+| Object | Tag | Mutability |
+| --- | --- | --- |
+| SDK | `rulego-plugin-sdk:abi-<64hex>-r<recipe12>` | immutable |
+| runtime canonical | `rulego-server:v1.0.0-<host>-r<recipe12>-<rev12>` | immutable |
+| runtime alias | `rulego-server:v1.0.0-<host>` | moves only after the canonical index is verified |
+
+`<host>` is one of `plugin`, `ai-plugin`, or `all-plugin`, and `<rev12>` is the
+packaging commit prefix. For example, the `plugin` host publishes
+`rulego-server:v1.0.0-plugin-r<recipe12>-<rev12>` and the alias
+`rulego-server:v1.0.0-plugin`. The SDK has no alias. There is no
+`latest-plugin`; canonical tags are first-writer immutable, and an alias is
+moved only after its canonical digest has been verified against the build
+evidence.
 
 Given a reviewed release record downloaded from the matching workflow run, the
 minimal build is:
 
 ```bash
 SDK_REF=$(jq -er '.sdk | select(test("@sha256:[0-9a-f]{64}$"))' plugin-abi-release.json)
-RUNTIME_REF=$(jq -er '.runtime | select(test("@sha256:[0-9a-f]{64}$"))' plugin-abi-release.json)
+RUNTIME_REF=$(jq -er '.runtime.plugin.canonical | select(test("@sha256:[0-9a-f]{64}$"))' \
+  plugin-abi-release.json)
 ABI_ID=$(jq -er '.abi_id' plugin-abi-release.json)
+RECIPE_ID=$(jq -er '.recipe_id' plugin-abi-release.json)
 LOCK_DIGEST=$(jq -er '.lock_digest' plugin-abi-release.json)
 
 install -d -m 0777 dist
@@ -75,6 +119,11 @@ jq -e --arg abi "$ABI_ID" --arg lock "$LOCK_DIGEST" --arg sha "$PLUGIN_SHA256" \
   '.abi_id == $abi and .platform == "linux/amd64" and
    .lock_digest == $lock and .plugin_sha256 == $sha' dist/plugin.so.abi.json
 ```
+
+The release record keys every runtime host, so substitute `ai-plugin` or
+`all-plugin` for `plugin` in the `jq` path when consuming that host. All three
+hosts open the same sidecar-verified plugin; only the compiled component set
+differs.
 
 Install only a sidecar-verified plugin in the runtime's persisted data path:
 
@@ -89,14 +138,14 @@ docker run --rm --platform linux/amd64 -p 9090:9090 \
 The complete canonical lock is available in both images at
 `/usr/share/rulego/plugin-abi.json`. OCI index annotations expose the ordered
 platform set and common ABI fields; each child config labels only its own
-platform. Plugin repositories may add plugin-only modules, but must explicitly
-align shared dependencies with the manifest; the SDK rejects mismatched host
-module identities and never edits the plugin checkout. Plugins are installed
+platform and records its `io.rulego.host` and `io.rulego.host.tags`. Plugin
+repositories may add plugin-only modules, but must explicitly align shared
+dependencies with the manifest; the SDK rejects mismatched host module
+identities and never edits the plugin checkout. Plugins are installed
 externally under `/app/data/plugins`; no business plugin is bundled in the
-runtime image.
-The digest-pinned SDK compiles the host and exports a root filesystem. The
-runtime recipe copies only that root filesystem into the pinned distroless
-base, so SDK layers and build tools never enter the runtime image.
+runtime image. The digest-pinned SDK compiles the host and exports a root
+filesystem. The runtime recipe copies only that root filesystem into the pinned
+distroless base, so SDK layers and build tools never enter the runtime image.
 
 ## Tags and upstream assets
 
@@ -162,12 +211,16 @@ each use.
 
 The independent [Plugin ABI verification workflow](.github/workflows/plugin-abi.yml)
 calls one repository command on each native amd64 and arm64 runner. That
-command uses a job-local registry, consumes the SDK by digest, exports the
-matching host rootfs, builds the runtime, loads a host-owned ABI probe, proves
-wrong-architecture, wrong-ABI, and missing-libc failures, and records image
-sizes. Business-plugin repositories consume the SDK digest and own their
-artifact compatibility checks. Ordinary push and pull-request runs neither
-request package-write permission nor move images between jobs.
+command uses a job-local registry, consumes the SDK by digest once, and then
+builds one runtime per host from `.distribution.hosts`: `plugin`, `ai-plugin`
+(`with_ai`), and `all-plugin` (`with_all`). Each host runtime loads the same
+host-owned ABI probe and proves wrong-architecture, wrong-ABI, and missing-libc
+failures, and each host records its own image sizes. The expected optional
+component is derived from the host tags rather than the host id: a host tagged
+`with_ai` or `with_all` must expose the `ai/agent` component, and `plugin` must
+not. Business-plugin repositories consume the SDK digest and own their artifact
+compatibility checks. Ordinary push and pull-request runs neither request package-write
+permission nor move images between jobs.
 
 The lock is release-ready only after a maintainer reviews a successful
 candidate size report, records positive ceilings, and reruns the full matrix.
@@ -175,9 +228,10 @@ External publication uses the separate
 [Plugin ABI publication workflow](.github/workflows/plugin-abi-publish.yml).
 It requires an explicit `publish=true` manual dispatch and approval of the
 `plugin-abi-release` environment. Native jobs stage their verified images with
-commit-qualified tags; the release job creates two-platform indexes without
-rebuilding, enforces first-writer immutable canonical tags, and verifies the
-returned GHCR digests before producing its release record.
+commit-qualified, host-qualified tags; the release job creates two-platform
+indexes per host without rebuilding, publishes first-writer immutable canonical
+tags, promotes each host alias only after its canonical digest is verified,
+and records the SDK plus every host digest in its release record.
 
 ## Maintenance checks
 

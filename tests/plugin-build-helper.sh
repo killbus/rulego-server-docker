@@ -45,7 +45,6 @@ CORE_VERSION=v1.2.3
 PLUGIN_MODE=plugin
 PLUGIN_FLAGS=-trimpath\ -buildvcs=false
 PLUGIN_LDFLAGS=''
-PLUGIN_WORKSPACE=generated-server-and-plugin
 SERVER_GO_MOD_SHA256=${mod_digest}
 SERVER_GO_SUM_SHA256=${sum_digest}
 EOF

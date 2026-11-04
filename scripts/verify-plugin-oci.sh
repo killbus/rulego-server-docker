@@ -7,10 +7,11 @@ repository_root=$(cd -- "${script_dir}/.." && pwd)
 # shellcheck source=scripts/lib.sh
 source "${script_dir}/lib.sh"
 
-[[ $# == 3 ]] || die 'usage: scripts/verify-plugin-oci.sh <sdk-index@digest> <runtime-index@digest> <candidate|release>'
+[[ $# == 4 ]] || die 'usage: scripts/verify-plugin-oci.sh <sdk-index@digest> <runtime-index@digest> <candidate|release> <host-id>'
 sdk_ref=$1
 runtime_ref=$2
 mode=$3
+host=$4
 [[ ${mode} == candidate || ${mode} == release ]] || die 'verification mode must be candidate or release'
 "${script_dir}/plugin-abi.sh" validate "--${mode}"
 require_command docker jq sha256sum
@@ -26,13 +27,18 @@ canonical_manifest=$("${script_dir}/plugin-abi.sh" render manifest)
 verify_index() {
   local variant=$1
   local ref=$2
-  local index=${work}/${variant}-index.json
+  local index_host=${3:-}
+  local label=${variant}
+  [[ -z ${index_host} ]] || label=${variant}-${index_host}
+  local index=${work}/${label}-index.json
   local expected_index repository arch child child_ref compressed uncompressed labels expected_child ceiling container copied
   local attestation
+  local -a index_metadata=("${variant}")
+  [[ -z ${index_host} ]] || index_metadata+=("" "${index_host}")
   [[ ${ref} =~ @sha256:[0-9a-f]{64}$ ]] || die "index must be addressed by digest: ${ref}"
   repository=${ref%@*}
   docker buildx imagetools inspect "${ref}" --format '{{json .Manifest}}' >"${index}"
-  expected_index=$("${script_dir}/plugin-abi.sh" render metadata "${variant}")
+  expected_index=$("${script_dir}/plugin-abi.sh" render metadata "${index_metadata[@]}")
   if [[ -n ${PLUGIN_ABI_PACKAGING_SOURCE:-} ]]; then
     expected_index=$(jq -c --arg source "${PLUGIN_ABI_PACKAGING_SOURCE}" '. + {"org.opencontainers.image.source":$source}' <<<"${expected_index}")
   fi
@@ -51,7 +57,7 @@ verify_index() {
     ($images | all(.digest as $digest | $attestations | any(.annotations["vnd.docker.reference.digest"] == $digest))) and
     ($expected | to_entries | all(.[]; $index.annotations[.key] == .value)) and
     (.annotations | has("io.rulego.abi.platform") | not)
-  ' "${index}" >/dev/null || die "${variant} index platform or annotation mismatch"
+  ' "${index}" >/dev/null || die "${label} index platform or annotation mismatch"
 
   while IFS= read -r attestation; do
     docker buildx imagetools inspect "${repository}@${attestation}" --raw
@@ -62,7 +68,7 @@ verify_index() {
         any($predicates[]; contains("slsa.dev/provenance")) and
         any($predicates[]; contains("spdx.dev/Document"))
       )
-    ' >/dev/null || die "${variant} provenance or SBOM attestation is missing"
+    ' >/dev/null || die "${label} provenance or SBOM attestation is missing"
 
   while IFS= read -r arch; do
     child=$(jq -er --arg arch "${arch}" '.manifests[] | select(.platform.os == "linux" and .platform.architecture == $arch) | .digest' "${index}")
@@ -70,7 +76,9 @@ verify_index() {
     compressed=$(docker buildx imagetools inspect "${child_ref}" --raw | jq -er '[.layers[].size] | add')
     retry_command 4 2 docker pull --platform "linux/${arch}" "${child_ref}" >/dev/null
     uncompressed=$(docker image inspect "${child_ref}" --format '{{.Size}}')
-    expected_child=$("${script_dir}/plugin-abi.sh" render metadata "${variant}" "${arch}")
+    local -a child_metadata=("${variant}" "${arch}")
+    [[ -z ${index_host} ]] || child_metadata+=("${index_host}")
+    expected_child=$("${script_dir}/plugin-abi.sh" render metadata "${child_metadata[@]}")
     if [[ -n ${PLUGIN_ABI_PACKAGING_SOURCE:-} ]]; then
       expected_child=$(jq -c --arg source "${PLUGIN_ABI_PACKAGING_SOURCE}" '. + {"org.opencontainers.image.source":$source}' <<<"${expected_child}")
     fi
@@ -82,23 +90,27 @@ verify_index() {
     jq -e --argjson expected "${expected_child}" '. as $labels |
       ($expected | to_entries | all(.[]; $labels[.key] == .value)) and
       ($labels | has("io.rulego.abi.platforms") | not)
-    ' <<<"${labels}" >/dev/null || die "${variant} ${arch} child-label mismatch"
+    ' <<<"${labels}" >/dev/null || die "${label} ${arch} child-label mismatch"
 
     container=$(docker create --platform "linux/${arch}" "${child_ref}")
-    copied=${work}/${variant}-${arch}-manifest.json
+    copied=${work}/${label}-${arch}-manifest.json
     docker cp "${container}:${manifest_path}" "${copied}"
     docker rm "${container}" >/dev/null
-    [[ $(jq -S -c . "${copied}") == "${canonical_manifest}" ]] || die "${variant} ${arch} embedded manifest mismatch"
+    [[ $(jq -S -c . "${copied}") == "${canonical_manifest}" ]] || die "${label} ${arch} embedded manifest mismatch"
 
-    ceiling=$("${script_dir}/plugin-abi.sh" render size-limit "${arch}" | jq -ec --arg variant "${variant#plugin-}" '.[$variant]')
-    if [[ ${mode} == release ]]; then
-      ((compressed <= $(jq -er '.compressed' <<<"${ceiling}"))) || die "${variant} ${arch} compressed size exceeds its ceiling"
-      ((uncompressed <= $(jq -er '.uncompressed' <<<"${ceiling}"))) || die "${variant} ${arch} uncompressed size exceeds its ceiling"
+    if [[ ${variant} == plugin-sdk ]]; then
+      ceiling=$("${script_dir}/plugin-abi.sh" render size-limit "${arch}" sdk)
+    else
+      ceiling=$("${script_dir}/plugin-abi.sh" render size-limit "${arch}" "${index_host}")
     fi
-    printf '%s\t%s\t%s\t%s\n' "${variant}" "${arch}" "${compressed}" "${uncompressed}" >>"${report}"
+    if [[ ${mode} == release ]]; then
+      ((compressed <= $(jq -er '.compressed' <<<"${ceiling}"))) || die "${label} ${arch} compressed size exceeds its ceiling"
+      ((uncompressed <= $(jq -er '.uncompressed' <<<"${ceiling}"))) || die "${label} ${arch} uncompressed size exceeds its ceiling"
+    fi
+    printf '%s\t%s\t%s\t%s\n' "${label}" "${arch}" "${compressed}" "${uncompressed}" >>"${report}"
   done < <("${script_dir}/plugin-abi.sh" render matrix | jq -r '.include[].goarch')
 }
 
 verify_index plugin-sdk "${sdk_ref}"
-verify_index plugin-runtime "${runtime_ref}"
+verify_index plugin-runtime "${runtime_ref}" "${host}"
 cat "${report}"
