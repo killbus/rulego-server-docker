@@ -58,23 +58,8 @@ release_version=$(jq -er '.abi.rulego_server.release_version' "${repository_root
 runtime_image=$(jq -er '.release.runtime_image' "${repository_root}/plugin-abi.lock")
 locked_hosts=$(jq -r '.abi.build.hosts[].id' "${repository_root}/plugin-abi.lock" | sort -u | paste -sd, -)
 
-# One architecture child's config, read through the registry without pulling any layer. The
-# repository and the digest stay separate so each level composes exactly one `@`.
-cast_config_label() {
-  local repository=${1:?repository is required} digest=${2:?index digest is required} label=${3:?label is required}
-  local child config
-  child=$(docker buildx imagetools inspect "${repository}@${digest}" --raw \
-    | jq -er '[.manifests[]? | select(.platform.architecture=="amd64")][0].digest')
-  config=$(docker buildx imagetools inspect "${repository}@${child}" --raw | jq -er '.config.digest')
-  docker buildx imagetools inspect "${repository}@${config}" --raw \
-    | jq -r --arg l "${label}" '.config.Labels[$l] // "unlabelled"'
-}
-
-index_annotation() {
-  local reference=${1:?image reference is required} label=${2:?label is required}
-  docker buildx imagetools inspect "${reference}" --format '{{json .Manifest}}' \
-    | jq -r --arg l "${label}" '.annotations[$l] // "unlabelled"'
-}
+# `cast_config_label` and `index_annotation` come from lib.sh, which needs the same reads to date a
+# published generation; a second copy here would be a second thing to keep correct.
 
 derive_names() {
   local revision=${1:?packaging revision is required} host=${2:?host id is required}

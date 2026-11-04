@@ -389,11 +389,102 @@ image_reference_digest() {
   done
 }
 
+
+# --- published-content readers, shared by every script that has to ask the registry a question ---
+
+# The annotations on a published index. Publication writes the identity here, so this is where a name's
+# content can be checked without believing the name.
+index_annotation() {
+  local reference=${1:?image reference is required} label=${2:?label is required}
+  docker buildx imagetools inspect "${reference}" --format '{{json .Manifest}}' \
+    | jq -r --arg l "${label}" '.annotations[$l] // "unlabelled"'
+}
+
+# The image config of one linux/amd64 child of a published index, read through the registry without
+# pulling a layer. Repository and digest stay separate arguments because each level composes exactly one
+# `@`, which is where a hand-built reference string goes wrong.
+cast_config_label() {
+  local repository=${1:?repository is required} digest=${2:?index digest is required} label=${3:?label is required}
+  local child config
+  child=$(docker buildx imagetools inspect "${repository}@${digest}" --raw \
+    | jq -er '[.manifests[]? | select(.platform.architecture=="amd64")][0].digest')
+  config=$(docker buildx imagetools inspect "${repository}@${child}" --raw | jq -er '.config.digest')
+  docker buildx imagetools inspect "${repository}@${config}" --raw \
+    | jq -r --arg l "${label}" '.config.Labels[$l] // "unlabelled"'
+}
+
+# One page of a repository's tag list. `--fail` matters: a 401 or a 404 has to be a failed request,
+# never an empty page, because an empty page reads as "nothing is published under these names".
+registry_tag_page() {
+  local scope=${1:?repository path is required} cursor=${2:-} page_size=${3:?} token=${4:?token is required}
+  local url="https://ghcr.io/v2/${scope}/tags/list?n=${page_size}" response
+  local status=0
+
+  [[ -n ${cursor} ]] && url+="&last=${cursor}"
+  response=$(curl --silent --show-error --fail --connect-timeout 15 --max-time 60 \
+    --header "Authorization: Bearer ${token}" "${url}") || return 1
+
+  # The last page of a repository is legitimately empty, so no names must not be an error -- but a body
+  # without a `tags` field is not a page either, and reading one as the end of the list quietly loses every
+  # generation after it. The two are told apart by exit status: 1 for a request that did not complete, 2
+  # for an answer that cannot be walked.
+  jq -r 'if has("tags") then ((.tags // []) | .[]) else error("the body carries no tags field") end' \
+    <<<"${response}" 2>/dev/null || status=$?
+  ((status == 0)) ||
+    printf 'error: the tag list response for %s is not a tag list\n' "${scope}" >&2
+  return "${status}"
+}
+
+# Every tag published in a repository, following the registry's own `last=` cursor. The registry caps a
+# page below whatever a repository holds, so code that reads one page and calls that the list silently
+# loses names -- and a name nobody listed cannot be seen to collide. If a page repeats the cursor the
+# registry ignored it, so the walk would visit the same page forever; that is refused, not looped on.
+registry_tags() {
+  local repository=${1:?repository is required}
+  local scope=${1#ghcr.io/}
+  local page_size=${REGISTRY_TAG_PAGE_SIZE:-200} max_pages=${REGISTRY_TAG_PAGE_LIMIT:-50}
+  local cursor='' page tags count token status
+
+  [[ ${repository} == ghcr.io/* ]] ||
+    die "tags can only be listed from ghcr.io, not from ${repository}"
+  require_positive_integer REGISTRY_TAG_PAGE_SIZE "${page_size}"
+  require_positive_integer REGISTRY_TAG_PAGE_LIMIT "${max_pages}"
+
+  token=$(curl --silent --show-error --fail --connect-timeout 15 --max-time 60 \
+    "https://ghcr.io/token?service=ghcr.io&scope=repository:${scope}:pull" | jq -er '.token') ||
+    die "the registry would not answer for the tag list of ${scope}; no tags are not the same as an empty list"
+
+  for ((page = 1; page <= max_pages; page += 1)); do
+    if tags=$(registry_tag_page "${scope}" "${cursor}" "${page_size}" "${token}"); then
+      :
+    else
+      status=$?
+      ((status != 2)) ||
+        die "${scope}: a tag list page came back in a shape that is not a tag list (page ${page}); an unreadable page is not the end of the repository"
+      die "the registry would not answer for the tag list of ${scope} (page ${page})"
+    fi
+    count=$(awk 'END { print NR }' <<<"${tags}")
+    [[ ${tags} == '' ]] && count=0
+    if (( count == 0 )); then
+      return 0
+    fi
+    if [[ -n ${cursor} ]] && grep -Fxq -- "${cursor}" <<<"${tags}"; then
+      die "${scope}: the registry ignored the pagination cursor, so the tag list cannot be walked"
+    fi
+    printf '%s\n' "${tags}"
+    cursor=$(tail -n 1 <<<"${tags}")
+    (( count < page_size )) && return 0
+  done
+
+  die "${scope}: the tag list did not finish within ${max_pages} pages of ${page_size}"
+}
+
 verify_exact_image_children() {
   local reference=${1:?image reference is required}
   local amd64_digest=${2:?amd64 digest is required}
   local arm64_digest=${3:?arm64 digest is required}
   local output=${4:?manifest output path is required}
+
 
   docker buildx imagetools inspect "${reference}" --format '{{json .Manifest}}' >"${output}"
   # `// []` keeps a manifest without an image list answering "not these images" instead of failing

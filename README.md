@@ -314,27 +314,82 @@ scripts/fetch-release.sh v1.0.0 all
 The compatibility record in `plugin-abi.lock` names the published SDK image that
 the previous-generation probe loads. Two of its four values are registry digests
 that nothing in this repository computes, so they are never typed by hand: a wrong
-digit still validates, and only the probe would notice. Point the helper at the
-revision whose lock was the released contract and paste what it prints:
+digit still validates, and only the probe would notice. Which revision that was is not
+something anyone has to remember either: the newest published generation is a fact about
+the registry, so the helper names it.
 
 ```bash
-block=$(scripts/derive-compatibility-sdk.sh derive <revision-of-the-previous-release>)
+block=$(scripts/derive-compatibility-sdk.sh derive auto)
 jq --argjson block "${block}" '.compatibility.previous_sdk = $block' \
   plugin-abi.lock >next.lock && mv next.lock plugin-abi.lock
 scripts/plugin-abi.sh validate --candidate
 ```
 
-The helper reads the identity from that revision's lock and the digests from the
-registry, and refuses rather than guess: no lock in the revision, a lock that is
-not a valid contract, a tag nobody published, a registry that would not answer, an
-index missing an architecture, an index that resolves both architectures to one
-digest, or a tag that moved between its two reads.
+There are two ways to name a published generation, and they ask different questions. A
+revision asks "the release cut from this source": its identity comes from the lock at that
+revision, never from a recomputation, because the identity function's domain has changed
+once and today's function hashes an older contract into a name that generation was never
+published under. An identity asks "the release published under this name", and it is the
+only question still answerable about a generation whose commit this checkout cannot
+read -- its identity then comes from what the published index annotates itself with.
+`derive auto` uses the second form, because a commit is the one thing a published
+generation is allowed to stop having; `previous` prints the same answer as an identity and
+a commit, with `-` for a commit that is not here.
+
+What has to agree is checked claim by claim: the tag resolves, the published index
+annotates the identity it is named for, the two architectures are present and distinct,
+and the image's own config names the commit it was built from. Against a revision that last
+claim must name that revision; against an identity it must either name a commit that is
+here and whose lock records the same identity, or be reported as unreadable. Refused
+rather than guessed: no lock in the revision, a lock recording no identity or one that is
+not a digest, a tag nobody published, a registry that would not answer, an index
+annotating an identity other than the tag it answers to, an index missing an architecture,
+an index that resolves both architectures to one digest, an image built from a commit that
+is not the one asked about, a commit that is here but carries no contract or a different
+one, or a tag that moved between its two reads.
+
+An unreachable commit is not on that list, and that is a measured fact rather than a
+preference: of the published SDK tags in this repository, one cites a commit that no
+remote ref carries, because it was cut from a dispatch ref that was later rewritten. A rule
+that refuses an undated generation therefore makes the gate permanently red, and the only
+way to green is to edit the gate by hand -- the transcription this helper exists to remove.
+Publication order is the authority for which generation came last, because the registry
+always records it; commit dates are the witness, read where they can be read. What stops
+the answer is a contradiction between the two, not a missing witness: a listed tag that
+does not resolve, a name holding an index that answers to another identity, a later
+publication whose commit is older, a later publication built from a commit the earlier one
+descends from, or a list of more than one generation where this checkout can date none --
+which is how a shallow clone answers, and where trusting the order with no witness at all
+would repeat the mistake that turned PR #21 red.
 
 `scripts/derive-compatibility-sdk.sh check` reads the other way round: it takes the
-record the lock already carries and compares it with the published index and both
-architecture images. The pull-request job that probes canonical tags runs it on
-every change, so a record that names bytes nobody published fails before merge
-rather than at the release that would have pulled them.
+record the lock already carries, compares it with the published index and both
+architecture images, and then compares it with the published order: the record must name
+the newest generation, not merely a published one. A rotation that was simply forgotten
+leaves every digest in it correct, so the order is the only thing that can see it. The
+pull-request job that probes canonical tags runs `check` on every change, so both a record
+naming bytes nobody published and a record one generation behind fail before merge rather
+than at the release that would have pulled them.
+
+Rotating the record moves nothing that has been published. `.compatibility` is not part of
+the manifest embedded in the images, so neither the lock identity nor the rendered manifest
+digest changes when it rotates, and no canonical name is affected by it.
+
+It does move the bytes of this file, which is what the golden identity vectors freeze in their
+lock column, so a rotation turns `tests/plugin-abi-identity-vectors.sh` red until that column is
+re-derived: `PLUGIN_ABI_DERIVE=1 bash tests/plugin-abi-identity-vectors.sh` prints what the shipped
+lock now measures. Only the lock column may differ from the literals in the file. The identity
+column and the embedded-document column are what those vectors exist to protect, and a rotation that
+leaves the contract alone has to leave both of them exactly as they are -- if either moves, this is a
+contract change to review, not a value to re-stamp.
+
+The lock's own layout is the output of `jq .` and nothing else, which is why the recipe above can rewrite the
+whole file with `jq` and still be a rotation: `tests/plugin-abi-lock.sh` refuses a lock whose bytes are not
+what `jq .` prints. That assertion exists because the file arrived by hand, in four pieces, and each piece
+kept the layout its author's tool produced -- 16 compact single-line objects among 98 lines of `jq` output,
+with no check able to see the difference because every digest here is taken from `jq -S -c` bytes. Layout
+carries no contract, so leaving it unowned cost a rotation's reviewability: the documented recipe moved 102
+lines that had nothing to do with the record being rotated.
 
 Run the local static and failure-injection gates with:
 
