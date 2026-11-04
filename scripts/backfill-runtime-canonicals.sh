@@ -1,0 +1,203 @@
+#!/usr/bin/env bash
+#
+# Give the bytes that were published before per-build canonical names existed the name the naming
+# function would have given them, so that a retired runtime cast stays addressable by name after the
+# moving alias has already gone on to a newer build.
+#
+# The plan lists digests, not names to invent. Every name is recomputed here from the packaging
+# revision the image itself carries, and an entry is refused unless:
+#
+#   * its digest and revision are well formed and the revision is a commit of this checkout;
+#   * the bytes at that digest carry that same revision in their own child config;
+#   * those bytes label the same product version the current lock releases;
+#   * the planned name equals what `render tags` derives for that revision, and the alias it was
+#     displaced from equals the alias the same derivation produces;
+#   * the target name is absent, or already holds exactly these bytes.
+#
+# A target that holds other bytes is a refusal, never a move. This script cannot rewrite a published
+# name, and that is the one rule the whole naming scheme rests on.
+#
+# Modes:
+#   check              read-only against the registry, writes nothing (the default)
+#   apply              writes, and only with PLUGIN_ABI_BACKFILL_APPLY=1
+#   derivation-only    validates the plan against this checkout and the naming function alone, with
+#                      no registry call, so the offline suite can grade a committed plan
+
+set -Eeuo pipefail
+
+script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+repository_root=$(cd -- "${script_dir}/.." && pwd)
+# shellcheck source=scripts/lib.sh
+source "${script_dir}/lib.sh"
+
+mode=${1:-check}
+[[ ${mode} == check || ${mode} == apply || ${mode} == derivation-only ]] \
+  || die "mode must be check, apply or derivation-only: ${mode}"
+
+plan=${PLUGIN_ABI_BACKFILL_PLAN:-${repository_root}/plugin-abi-backfill.json}
+record=${PLUGIN_ABI_BACKFILL_RECORD:-${repository_root}/tmp/plugin-abi-backfill-report.json}
+owner=${GITHUB_REPOSITORY_OWNER:-}
+owner=${owner,,}
+[[ -f ${plan} ]] || die "no backfill plan at ${plan}"
+
+if [[ ${mode} == apply ]]; then
+  [[ ${PLUGIN_ABI_BACKFILL_APPLY:-} == 1 ]] \
+    || die 'apply requires PLUGIN_ABI_BACKFILL_APPLY=1, because this mode writes published names'
+  [[ -n ${owner} ]] || die 'apply requires GITHUB_REPOSITORY_OWNER to name the published owner'
+fi
+if [[ ${mode} == check || ${mode} == apply ]]; then
+  require_command docker
+fi
+
+release_version=$(jq -er '.abi.rulego_server.release_version' "${repository_root}/plugin-abi.lock")
+runtime_image=$(jq -er '.release.runtime_image' "${repository_root}/plugin-abi.lock")
+locked_hosts=$(jq -r '.abi.build.hosts[].id' "${repository_root}/plugin-abi.lock" | sort -u | paste -sd, -)
+
+# One architecture child's config, read through the registry without pulling any layer. The
+# repository and the digest stay separate so each level composes exactly one `@`.
+cast_config_label() {
+  local repository=${1:?repository is required} digest=${2:?index digest is required} label=${3:?label is required}
+  local child config
+  child=$(docker buildx imagetools inspect "${repository}@${digest}" --raw \
+    | jq -er '[.manifests[]? | select(.platform.architecture=="amd64")][0].digest')
+  config=$(docker buildx imagetools inspect "${repository}@${child}" --raw | jq -er '.config.digest')
+  docker buildx imagetools inspect "${repository}@${config}" --raw \
+    | jq -r --arg l "${label}" '.config.Labels[$l] // "unlabelled"'
+}
+
+index_annotation() {
+  local reference=${1:?image reference is required} label=${2:?label is required}
+  docker buildx imagetools inspect "${reference}" --format '{{json .Manifest}}' \
+    | jq -r --arg l "${label}" '.annotations[$l] // "unlabelled"'
+}
+
+derive_names() {
+  local revision=${1:?packaging revision is required} host=${2:?host id is required}
+  PLUGIN_ABI_NAME_REVISION="${revision}" "${script_dir}/plugin-abi.sh" render tags \
+    | jq -er --arg h "${host}" '{canonical: .runtime[$h].canonical, alias: .runtime[$h].alias}'
+}
+
+count=$(jq -r '.entries | length' "${plan}")
+(( count > 0 )) || die 'the plan holds no entries'
+
+actions=()
+for ((index = 0; index < count; index += 1)); do
+  entry=$(jq -c --argjson i "${index}" '.entries[$i]' "${plan}")
+  host=$(jq -er '.host' <<<"${entry}")
+  digest=$(jq -er '.digest' <<<"${entry}")
+  revision=$(jq -er '.packaging_revision' <<<"${entry}")
+  planned=$(jq -er '.canonical_ref' <<<"${entry}")
+  displaced=$(jq -er '.displaced_alias' <<<"${entry}")
+
+  [[ ${digest} =~ ^sha256:[0-9a-f]{64}$ ]] || die "entry ${host}: the digest is not a sha256"
+  [[ ${revision} =~ ^[0-9a-f]{40}$ ]] || die "entry ${host}: the packaging revision is not 40 hex"
+  [[ ,${locked_hosts}, == *",${host},"* ]] || die "entry ${host}: not a host of the current lock"
+  git cat-file -e "${revision}^{commit}" 2>/dev/null \
+    || die "entry ${host}: that revision is not a commit of this checkout"
+
+  derived=$(derive_names "${revision}" "${host}")
+  want_canonical=$(jq -er '.canonical' <<<"${derived}")
+  want_alias=$(jq -er '.alias' <<<"${derived}")
+  # The name must be derived, and derived into the repository this contract publishes.
+  [[ ${planned} == "${planned%:*}:${want_canonical##*:}" ]] \
+    || die "entry ${host}: the plan names ${planned##*:}, the naming function produces ${want_canonical##*:}"
+  if [[ -n ${owner} ]]; then
+    [[ ${planned%:*} == "ghcr.io/${owner}/${runtime_image}" ]] \
+      || die "entry ${host}: the plan writes into ${planned%:*}, where this contract publishes nothing"
+  else
+    [[ ${planned%:*} == */"${runtime_image}" ]] \
+      || die "entry ${host}: the plan writes into a repository other than ${runtime_image}"
+  fi
+  [[ ${displaced} == "${displaced%:*}:${want_alias##*:}" ]] \
+    || die "entry ${host}: the alias for that revision is ${want_alias##*:}, the plan says ${displaced##*:}"
+  # Nothing compares `planned` with `displaced`: each is checked against the naming function above,
+  # and the function's two names for one host differ by the revision suffix, so equality there is not a
+  # state a plan can express. A guard that no input can reach would only ever be tested by deleting it.
+
+  if [[ ${mode} == derivation-only ]]; then
+    actions+=( "$(jq -cn --arg h "${host}" --arg c "${planned}" --arg d "${digest}" \
+      '{host:$h, canonical_ref:$c, digest:$d, action:"derived"}')" )
+    continue
+  fi
+
+  # Both reads are failures of the question, not answers of "no": a registry that will not talk must
+  # never be read as bytes that disagree, and certainly not as a name that is free.
+  if ! cast_revision=$(cast_config_label "${planned%:*}" "${digest}" org.opencontainers.image.revision); then
+    die "entry ${host}: the registry could not answer what those bytes carry, and silence is not evidence"
+  fi
+  [[ ${cast_revision} == "${revision}" ]] \
+    || die "entry ${host}: those bytes carry a different packaging revision than the plan names"
+  if ! cast_release=$(index_annotation "${planned%:*}@${digest}" io.rulego.server.release); then
+    die "entry ${host}: the registry could not answer what release those bytes are, and silence is not evidence"
+  fi
+  [[ ${cast_release} == "${release_version}" ]] \
+    || die "entry ${host}: those bytes are release ${cast_release}, the contract releases ${release_version}"
+
+  status=0
+  holding=$(image_reference_digest "${planned}") || status=$?
+  case ${status} in
+    0)
+      [[ ${holding} == "${digest}" ]] \
+        || die "entry ${host}: that name already holds other bytes, and a published name is never moved"
+      log "entry ${host}: the name already holds exactly these bytes"
+      actions+=( "$(jq -cn --arg h "${host}" --arg c "${planned}" --arg d "${digest}" \
+        '{host:$h, canonical_ref:$c, digest:$d, action:"noop", digest_matches:true}')" )
+      ;;
+    1)
+      actions+=( "$(jq -cn --arg h "${host}" --arg c "${planned}" --arg d "${digest}" \
+        '{host:$h, canonical_ref:$c, digest:$d, action:"mint", digest_matches:false}')" )
+      ;;
+    *)
+      die "entry ${host}: the registry could not answer whether the name exists, and absence is not a default"
+      ;;
+  esac
+done
+
+mkdir -p "$(dirname -- "${record}")"
+report=$(IFS=,; printf '[%s]' "${actions[*]}")
+jq -n --arg mode "${mode}" --arg plan "${plan##*/}" --argjson entries "${report}" \
+  '{mode:$mode, plan:$plan, entries:$entries}' | jq -S '.' > "${record}"
+
+if [[ ${mode} != apply ]]; then
+  log "$(jq -r '[.entries[].action] | group_by(.) | map("\(.[0])=\(length)") | join(" ")' "${record}")"
+  exit 0
+fi
+
+for entry_json in "${actions[@]}"; do
+  [[ $(jq -r '.action' <<<"${entry_json}") == mint ]] || continue
+  host=$(jq -r '.host' <<<"${entry_json}")
+  target=$(jq -r '.canonical_ref' <<<"${entry_json}")
+  digest=$(jq -r '.digest' <<<"${entry_json}")
+  log "entry ${host}: minting ${target##*:}"
+  docker buildx imagetools create --tag "${target}" "${target%:*}@${digest}"
+  now=$(image_reference_digest "${target}") || die "entry ${host}: written and unreadable"
+  [[ ${now} == "${digest}" ]] || die "entry ${host}: the new name resolves to other bytes"
+done
+
+# Every entry is read again, including the ones that were already right, and the record's answer is
+# that read rather than anything this run predicted. A record that says a name holds these bytes
+# because a write command exited zero is not evidence; the name is checked, and a failure is reported
+# in the record before it is reported on the console.
+results=()
+for entry_json in "${actions[@]}"; do
+  host=$(jq -r '.host' <<<"${entry_json}")
+  target=$(jq -r '.canonical_ref' <<<"${entry_json}")
+  digest=$(jq -r '.digest' <<<"${entry_json}")
+  read_back=''
+  status=0
+  read_back=$(image_reference_digest "${target}") || status=$?
+  matches=false
+  [[ ${status} == 0 && ${read_back} == "${digest}" ]] && matches=true
+  results+=( "$(jq -cn --arg h "${host}" --arg c "${target}" --arg d "${digest}" --argjson m "${matches}" \
+    '{host:$h, canonical_ref:$c, digest:$d, digest_matches:$m}')" )
+done
+merged=$(jq -n --argjson a "$(IFS=,; printf '[%s]' "${actions[@]}")" --argjson r "$(IFS=,; printf '[%s]' "${results[@]}")" \
+  '{entries: [ $a[] as $e | ($r[] | select(.canonical_ref == $e.canonical_ref)) as $v | $e + {digest_matches: $v.digest_matches} ]}')
+jq -n --arg mode "${mode}" --arg plan "${plan##*/}" --argjson merged "${merged}" \
+  '{mode:$mode, plan:$plan, entries:$merged.entries}' | jq -S '.' > "${record}"
+if [[ $(jq -r '[.entries[] | select(.digest_matches | not)] | length' "${record}") != 0 ]]; then
+  jq -r '.entries[] | select(.digest_matches | not) | "entry \(.host): \(.canonical_ref) does not resolve to these bytes"' \
+    "${record}" >&2
+  die 'the backfill did not leave every named entry holding the bytes the plan describes'
+fi
+log "backfill applied: $(jq -r '[.entries[].action] | group_by(.) | map("\(.[0])=\(length)") | join(" ")' "${record}")"

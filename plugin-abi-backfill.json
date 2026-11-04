@@ -1,0 +1,20 @@
+{
+  "entries": [
+    {
+      "canonical_ref": "ghcr.io/killbus/rulego-server:v1.0.0-plugin-006436e34d1f",
+      "digest": "sha256:53719b71a4890a39086a921c557ab2c0386de57a5450cceaad5d7fc7564f0419",
+      "displaced_alias": "ghcr.io/killbus/rulego-server:v1.0.0-plugin",
+      "host": "plugin",
+      "packaging_revision": "006436e34d1fa2cd811f840547724fb0ace3605b"
+    },
+    {
+      "canonical_ref": "ghcr.io/killbus/rulego-server:v1.0.0-ai-plugin-b31cbc796318",
+      "digest": "sha256:57ffec57766f4a9ebccf4dfcaaa2521e8af668b6fd50331913ce27ca47c0f8f7",
+      "displaced_alias": "ghcr.io/killbus/rulego-server:v1.0.0-ai-plugin",
+      "host": "ai-plugin",
+      "packaging_revision": "b31cbc7963181a5d7d5298d6e03e195a93f498a3"
+    }
+  ],
+  "reason": "These runtime casts were published before per-build canonical names existed, and they lost their only name when a release promoted the aliases onto names that do. Each canonical name below is what the naming function produces for the packaging revision the image itself carries, and the product version inside that name is the version the cast labels in its own config, so the write creates a name and moves nothing.",
+  "schema_version": 1
+}

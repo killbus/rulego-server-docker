@@ -23,6 +23,10 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
+          # The suite grades the committed backfill plan, and that gate asks whether each revision the
+          # plan cites is a commit of this checkout. At the default depth of one the answer is no even
+          # when the plan is correct, so the checkout depth is part of what the test is able to say.
+          fetch-depth: 0
       - name: Run the offline test suite
         run: tests/run.sh
 
