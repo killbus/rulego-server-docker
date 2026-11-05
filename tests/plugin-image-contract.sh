@@ -11,6 +11,23 @@ assert_contains() {
   grep -Fq -- "$2" "$1" || { printf 'missing required contract in %s: %s\n' "$1" "$2" >&2; exit 1; }
 }
 
+# A workflow-level assertion must be scoped to the job it constrains: the same
+# condition text also appears in unrelated legacy jobs, and grepping the whole
+# file would stay green after the ABI gate lost that condition.
+job_block() {
+  awk -v job="$2" '
+    $0 ~ "^  " job ":" { inside = 1; print; next }
+    inside && /^  [A-Za-z0-9_-]+:/ { exit }
+    inside { print }
+  ' "$1"
+}
+
+assert_block_contains() {
+  # `grep -F` splits a multi-line pattern into alternatives, so a removed line
+  # would still match the remaining ones. Compare the whole string instead.
+  [[ $1 == *"$2"* ]] || { printf 'missing required contract in job: %s\n' "$2" >&2; exit 1; }
+}
+
 assert_contains Dockerfile.plugin-sdk 'FROM ${SDK_BASE}'
 assert_contains Dockerfile.plugin-sdk 'COPY --chown=65532:65532 gomodcache-root/ /'
 assert_contains Dockerfile.plugin-sdk 'COPY --chown=0:0 stage-root/ /'
@@ -115,11 +132,38 @@ assert_contains scripts/plugin-abi-build.sh '-gcflags=all=-N'
 verify_workflow=.github/workflows/plugin-abi.yml
 publish_workflow=.github/workflows/plugin-abi-publish.yml
 backfill_workflow=.github/workflows/plugin-abi-backfill.yml
+release_workflow=.github/workflows/publish.yml
 assert_contains "${verify_workflow}" 'run: scripts/plugin-abi-build.sh "${{ matrix.goarch }}"'
 assert_contains "${publish_workflow}" 'run: scripts/plugin-abi-build.sh "${{ matrix.goarch }}"'
 assert_contains "${publish_workflow}" 'run: scripts/plugin-abi-publish.sh tmp/evidence'
 assert_contains "${publish_workflow}" 'environment: plugin-abi-release'
 assert_contains "${publish_workflow}" 'packages: write'
+# The ABI workflow is also the reusable half of the normal release flow. It must accept a caller,
+# use the same `inputs` context for both entry points, and let the caller withhold alias movement
+# when it is publishing an older stable release.
+assert_contains "${publish_workflow}" 'workflow_call:'
+assert_contains "${publish_workflow}" 'promote_aliases:'
+assert_contains "${publish_workflow}" 'if: ${{ inputs.promote_aliases }}'
+if grep -Fq 'github.event.inputs.publish' "${publish_workflow}"; then
+  echo 'a reusable workflow reads dispatch-only inputs and will break when called' >&2
+  exit 1
+fi
+abi_release_job=$(job_block "${release_workflow}" publish-plugin-abi)
+# One contiguous expression: every gate is checked in the same `if:`, so a
+# condition that is dropped, reordered, or changed from `&&` to `||` fails.
+assert_block_contains "${abi_release_job}" "    if: >-
+      needs.resolve.outputs.should_build == 'true' &&
+      needs.resolve.outputs.staging_only == 'false' &&
+      needs.resolve.outputs.abi_ready == 'true' &&
+      needs.resolve.outputs.version == needs.resolve.outputs.abi_release_version &&
+      needs.publish.result == 'success'
+    permissions:"
+assert_block_contains "${abi_release_job}" 'uses: ./.github/workflows/plugin-abi-publish.yml'
+assert_block_contains "${abi_release_job}" 'promote_aliases: ${{ needs.resolve.outputs.is_latest == '\''true'\'' }}'
+if grep -Fq 'if: always()' <<<"${abi_release_job}"; then
+  echo 'the ABI publication job can run after a failed legacy publication' >&2
+  exit 1
+fi
 # The alias promotion is a separate step, run after the immutable names are written and verified. Its
 # position is the contract: a step that moved `v1.0.0-<host>` before verification would advertise
 # content nothing checked, and that is the exact ordering the two-phase publication exists to forbid.

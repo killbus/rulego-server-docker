@@ -54,7 +54,11 @@ grep -Fq 'stage=${PLUGIN_ABI_STAGE:-false}' "${build}"
 }
 grep -Fq 'PLUGIN_ABI_PUBLISH=true also requires PLUGIN_ABI_STAGE=true' "${build}"
 grep -Fq 'PLUGIN_ABI_STAGE: "true"' .github/workflows/plugin-abi-publish.yml
-grep -Fq 'PLUGIN_ABI_PUBLISH: ${{ github.event.inputs.publish }}' .github/workflows/plugin-abi-publish.yml
+grep -Fq 'PLUGIN_ABI_PUBLISH: ${{ inputs.publish }}' .github/workflows/plugin-abi-publish.yml
+if grep -Fq 'github.event.inputs' .github/workflows/plugin-abi-publish.yml; then
+  echo 'the reusable ABI workflow reads dispatch-only inputs and breaks when called' >&2
+  exit 1
+fi
 grep -Fq 'dispatch requires publish=true or staging_only=true' .github/workflows/plugin-abi-publish.yml
 
 expect_failure 'PLUGIN_ABI_PUBLISH=true also requires PLUGIN_ABI_STAGE=true' env \
