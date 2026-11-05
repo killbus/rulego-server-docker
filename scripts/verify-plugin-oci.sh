@@ -38,7 +38,16 @@ canonical_manifest=$("${script_dir}/plugin-abi.sh" render manifest)
 verify_index() {
   local variant=$1
   local ref=$2
-  local host_id=${3:-plugin}
+  local host_id=${3:-}
+  [[ ${variant} != plugin-runtime || -n ${host_id} ]] || die 'plugin-runtime verification requires a host id'
+  local -a index_metadata_args=("${variant}")
+  local -a child_metadata_args=("${variant}")
+  local -a size_limit_args=()
+  if [[ -n ${host_id} ]]; then
+    index_metadata_args+=("" "${host_id}")
+    child_metadata_args+=("" "${host_id}")
+    size_limit_args+=("${host_id}")
+  fi
   local identity=${variant}
   [[ ${variant} != plugin-runtime ]] || identity=${variant}-${host_id}
   local index=${work}/${identity}-index.json
@@ -47,7 +56,7 @@ verify_index() {
   [[ ${ref} =~ @sha256:[0-9a-f]{64}$ ]] || die "index must be addressed by digest: ${ref}"
   repository=${ref%@*}
   docker buildx imagetools inspect "${ref}" --format '{{json .Manifest}}' >"${index}"
-  expected_index=$("${script_dir}/plugin-abi.sh" render metadata "${variant}" '' "${host_id}")
+  expected_index=$("${script_dir}/plugin-abi.sh" render metadata "${index_metadata_args[@]}")
   jq -e --argjson expected "${expected_index}" '. as $index |
     (.manifests | map(select(.platform.os == "linux" and (.platform.architecture == "amd64" or .platform.architecture == "arm64")))) as $images |
     (.manifests | map(select(.platform.os == "unknown" and .platform.architecture == "unknown" and .annotations["vnd.docker.reference.type"] == "attestation-manifest"))) as $attestations |
@@ -78,7 +87,9 @@ verify_index() {
     compressed=$(docker buildx imagetools inspect "${child_ref}" --raw | jq -er '[.layers[].size] | add')
     retry_command 4 2 docker pull --platform "linux/${arch}" "${child_ref}" >/dev/null
     uncompressed=$(docker image inspect "${child_ref}" --format '{{.Size}}')
-    expected_child=$("${script_dir}/plugin-abi.sh" render metadata "${variant}" "${arch}" "${host_id}")
+    child_metadata_args=("${variant}" "${arch}")
+    [[ -z ${host_id} ]] || child_metadata_args+=("${host_id}")
+    expected_child=$("${script_dir}/plugin-abi.sh" render metadata "${child_metadata_args[@]}")
     labels=$(docker image inspect "${child_ref}" --format '{{json .Config.Labels}}')
     jq -e --argjson expected "${expected_child}" '. as $labels |
       ($expected | to_entries | all(.[]; $labels[.key] == .value)) and
@@ -91,7 +102,9 @@ verify_index() {
     docker rm "${container}" >/dev/null
     [[ $(jq -S -c . "${copied}") == "${canonical_manifest}" ]] || die "${variant} ${arch} embedded manifest mismatch"
 
-    ceiling=$("${script_dir}/plugin-abi.sh" render size-limit "${arch}" "${host_id}" |
+    size_limit_args=("${arch}")
+    [[ -z ${host_id} ]] || size_limit_args+=("${host_id}")
+    ceiling=$("${script_dir}/plugin-abi.sh" render size-limit "${size_limit_args[@]}" |
       jq -ec --arg variant "${variant#plugin-}" '.[$variant]')
     if [[ ${mode} == release ]]; then
       ((compressed <= $(jq -er '.compressed' <<<"${ceiling}"))) || die "${variant} ${arch} compressed size exceeds its ceiling"

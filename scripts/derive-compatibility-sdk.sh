@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Derive the `.compatibility.previous_sdk` block from the registry, and check a recorded one against
+# Derive the `.distribution.compatibility.previous_sdk` block from the registry, and check a recorded one against
 # it, instead of transcribing either.
 #
 # The compatibility probe loads a plugin built against the previous SDK into the new runtime, so this
@@ -37,7 +37,7 @@ repository_root=$(cd -- "${script_dir}/.." && pwd)
 source "${script_dir}/lib.sh"
 
 usage() {
-  printf 'Usage: %s derive <revision|abi-id|auto>  prints the .compatibility.previous_sdk block\n' \
+  printf 'Usage: %s derive <revision|abi-id|auto>  prints the .distribution.compatibility.previous_sdk block\n' \
     "%s previous                 prints the newest published generation and its commit\n" \
     "%s check [plugin-abi.lock]  verifies the recorded block against the registry and against publication order\n" \
     "${0##*/}" "${0##*/}" "${0##*/}" >&2
@@ -54,7 +54,10 @@ current_sdk_repository() {
 
   owner=${GITHUB_REPOSITORY_OWNER:?GITHUB_REPOSITORY_OWNER is required}
   owner=${owner,,}
-  image=$(jq -er '.release.sdk_image' "${lock_file}") ||
+  # A revision may predate the distribution split, so the SDK repository is read from
+  # the current path first and from the historical one only when deriving from an old
+  # lock. New locks never carry the legacy field.
+  image=$(jq -er '.distribution.release.sdk_image // .release.sdk_image' "${lock_file}") ||
     die "${lock_file} records no SDK image, so there is no repository whose tags could be listed"
   printf 'ghcr.io/%s/%s\n' "${owner}" "${image}"
 }
@@ -68,6 +71,57 @@ current_lock_identity() {
   identity=$(jq -er '.abi_id' "${lock_file}") ||
     die "${lock_file} records no identity to exclude from the published order"
   printf '%s\n' "${identity}"
+}
+
+# Resolve the published tag that carries one SDK identity. Generations cut before the recipe
+# split were published as `abi-<identity>`; current publication appends `-r<recipe12>`. The
+# compatibility record stores only the identity, so both naming generations are enumerated: one
+# identity that answers to more than one set of bytes does not name one release, and that is
+# refused rather than guessed. When both names carry the same bytes the pre-split name is kept,
+# because it is the name that generation was published under.
+published_sdk_reference() {
+  local repository=${1:?SDK repository is required}
+  local abi_id=${2:?SDK identity is required}
+  local tags tag digest status=0 legacy_digest=''
+  local -a matches=()
+
+  if legacy_digest=$(image_reference_digest "${repository}:${abi_id}"); then
+    :
+  else
+    status=$?
+    ((status == 1)) ||
+      die "the registry could not answer for ${repository}:${abi_id}; nothing was resolved"
+    legacy_digest=''
+  fi
+
+  tags=$(registry_tags "${repository}") ||
+    die "the published SDK tags could not be listed; nothing was resolved"
+  while IFS= read -r tag; do
+    [[ ${tag} =~ ^${abi_id}-r[0-9a-f]{12}$ ]] || continue
+    matches+=("${tag}")
+  done <<<"${tags}"
+
+  if [[ -n ${legacy_digest} ]]; then
+    for tag in "${matches[@]}"; do
+      if digest=$(image_reference_digest "${repository}:${tag}"); then
+        [[ ${digest} == "${legacy_digest}" ]] ||
+          die "${repository}:${abi_id:0:12} answers to more than one set of bytes (${abi_id} and ${tag}); the identity does not name one release"
+      else
+        status=$?
+        ((status == 1)) ||
+          die "the registry could not answer for ${repository}:${tag}; nothing was resolved"
+        die "${tag} was listed by the registry and does not resolve, so nothing here can be resolved"
+      fi
+    done
+    printf '%s:%s\n' "${repository}" "${abi_id}"
+    return 0
+  fi
+
+  case ${#matches[@]} in
+    0) return 1 ;;
+    1) printf '%s:%s\n' "${repository}" "${matches[0]}" ;;
+    *) die "more than one recipe-qualified SDK tag carries ${abi_id:0:12}; the identity does not name one release" ;;
+  esac
 }
 
 require_command git jq docker
@@ -85,11 +139,10 @@ derive_compatibility_record() {
   # Two ways of naming the same generation, because two different things are being asked.
   #
   # A revision asks "the release cut from this source". Its identity is read out of the lock that revision
-  # carries, never recomputed: the identity function's domain changed once, so today's function hashes an older
-  # contract into a name that generation was never published under. Measured against the live registry, none of
-  # the four published SDK tags other than this identity validates under today's schema -- `.abi.packaging` was
-  # added after all four were cut -- which is exactly why demanding that validation left transcription as the
-  # only answer that could ever ship.
+  # carries, never recomputed: the identity function's domain changed across releases, so today's function
+  # hashes an older contract into a name that generation was never published under. Measured against the live
+  # registry, none of the four published SDK tags other than this identity validates under today's schema,
+  # which is exactly why demanding that validation left transcription as the only answer that could ever ship.
   #
   # An identity asks "the release published under this name". That is the only question answerable about a
   # generation whose commit is no longer reachable here, and the identity then comes from the published index's
@@ -109,7 +162,8 @@ derive_compatibility_record() {
       die "the lock at ${asked_rev:0:9} records an identity that is not an ABI digest"
     repository=$(current_sdk_repository "${previous_lock}")
   fi
-  reference=${repository}:${abi_id}
+  reference=$(published_sdk_reference "${repository}" "${abi_id}") ||
+    die "no published SDK tag carries ${abi_id:0:12}: ${repository}"
 
   # A name that does not resolve is not a previous release. An absent tag and a registry that would not answer
   # are reported apart, because one means the release never happened and the other means retry.
@@ -183,7 +237,8 @@ derive_compatibility_record() {
 # Rows are `<push position>\t<identity>\t<commit or ->\t<date or ->`, in publication order.
 published_sdk_generations() {
   local repository=${1:?repository is required} self=${2:?this identity is required}
-  local tags tag index status revision date annotated position=0
+  local tags tag identity index status revision date annotated position=0
+  local -A seen=()
 
   # The list is materialised before it is walked, because this function is always called through a command
   # substitution and a command substitution does not inherit errexit: without the explicit exit, the pages that
@@ -191,8 +246,11 @@ published_sdk_generations() {
   # happened to see.
   tags=$(registry_tags "${repository}") || exit 1
   while IFS= read -r tag; do
-    [[ ${tag} =~ ^abi-[0-9a-f]{64}$ ]] || continue
-    [[ ${tag} == "${self}" ]] && continue
+    [[ ${tag} =~ ^(abi-[0-9a-f]{64})(-r[0-9a-f]{12})?$ ]] || continue
+    identity=${BASH_REMATCH[1]}
+    [[ ${identity} == "${self}" ]] && continue
+    [[ -z ${seen[${identity}]:-} ]] || continue
+    seen[${identity}]=1
     position=$((position + 1))
 
     if index=$(image_reference_digest "${repository}:${tag}"); then
@@ -209,7 +267,7 @@ published_sdk_generations() {
     # ordering by it would put a release at a position its content never earned.
     annotated=$(index_annotation "${repository}:${tag}" io.rulego.abi.id) ||
       die "${tag:0:12}: the published index could not be read; no answer is not the same as no generation"
-    [[ ${annotated} == "${tag}" ]] ||
+    [[ ${annotated} == "${identity}" ]] ||
       die "${tag:0:12} answers to an index that annotates ${annotated:0:12}: the name and the content of a published generation disagree"
 
     if ! revision=$(cast_config_label "${repository}" "${index}" org.opencontainers.image.revision); then
@@ -223,7 +281,7 @@ published_sdk_generations() {
     else
       revision=-
     fi
-    printf '%s\t%s\t%s\t%s\n' "${position}" "${tag}" "${revision}" "${date}"
+    printf '%s\t%s\t%s\t%s\n' "${position}" "${identity}" "${revision}" "${date}"
   done <<<"${tags}"
 }
 
@@ -274,9 +332,9 @@ newest_published_sdk_generation() {
 # simply one generation behind, and the compatibility probe then proves less than it claims to.
 assert_record_is_newest() {
   local lock_file=${1:?plugin ABI lock is required}
-  local record repository recorded_abi self newest newest_tag newest_rev
+  local record repository recorded_abi self newest newest_tag newest_rev newest_desc
 
-  record=$(jq -ec '.compatibility.previous_sdk' "${lock_file}") ||
+  record=$(jq -ec '.distribution.compatibility.previous_sdk' "${lock_file}") ||
     die "the lock records no compatibility SDK: ${lock_file}"
   repository=$(jq -er '.repository' <<<"${record}")
   recorded_abi=$(jq -er '.abi_id' <<<"${record}")
@@ -285,10 +343,14 @@ assert_record_is_newest() {
   newest=$(newest_published_sdk_generation "${repository}" "${self}") ||
     die "${repository}: the published generations are not legible, so the recorded compatibility SDK was not verified"
   IFS=$'\t' read -r newest_tag newest_rev <<<"${newest}"
-  [[ ${newest_tag} == "${recorded_abi}" ]] ||
-    die "the recorded compatibility SDK ${recorded_abi:0:12} is not the newest published generation: ${newest_tag:0:12}, built from $(
-      [[ ${newest_rev} == '-' ]] && printf 'a revision this checkout cannot see' || git rev-parse --short "${newest_rev}"
-    ), is. Rotate with '${0##*/} derive auto'."
+  if [[ ${newest_tag} != "${recorded_abi}" ]]; then
+    if [[ ${newest_rev} == '-' ]]; then
+      newest_desc='a revision this checkout cannot see'
+    else
+      newest_desc=$(git rev-parse --short "${newest_rev}")
+    fi
+    die "the recorded compatibility SDK ${recorded_abi:0:12} is not the newest published generation: ${newest_tag:0:12}, built from ${newest_desc}, is. Rotate with '${0##*/} derive auto'."
+  fi
   log "compatibility record is the newest published generation: ${newest_tag:0:12}"
 }
 
@@ -300,14 +362,15 @@ check_compatibility_record() {
   local lock_file=${1:?plugin ABI lock is required}
   local record repository abi_id recorded_index amd64 arm64 reference index_digest manifest status
 
-  record=$(jq -ec '.compatibility.previous_sdk' "${lock_file}") ||
+  record=$(jq -ec '.distribution.compatibility.previous_sdk' "${lock_file}") ||
     die "the lock records no compatibility SDK: ${lock_file}"
   repository=$(jq -er '.repository' <<<"${record}")
   abi_id=$(jq -er '.abi_id' <<<"${record}")
   recorded_index=$(jq -er '.index_digest' <<<"${record}")
   amd64=$(jq -er '.children.amd64' <<<"${record}")
   arm64=$(jq -er '.children.arm64' <<<"${record}")
-  reference=${repository}:${abi_id}
+  reference=$(published_sdk_reference "${repository}" "${abi_id}") ||
+    die "the recorded compatibility SDK tag is not published: ${repository}:${abi_id}"
 
   # Absent and unanswered are reported apart, as in derive mode: one means the record names a
   # release that never happened, the other means the check could not be made at all.

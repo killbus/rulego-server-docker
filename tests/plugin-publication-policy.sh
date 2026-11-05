@@ -350,7 +350,8 @@ registry_mock() {
   esac
 }
 
-MOCK_HELD_BY=$(jq -er '.compatibility.previous_sdk.abi_id' "${repository_root}/plugin-abi.lock")
+MOCK_HELD_BY=$(jq -er '.distribution.compatibility.previous_sdk.abi_id' \
+  "${repository_root}/plugin-abi.lock")
 rm -f -- "${state}" "${docker_log}"
 image_reference_digest() { registry_mock "${1:-}"; }
 gate_out=$(require_immutable_tags_publishable "${superseded_plan}") || {

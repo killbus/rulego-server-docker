@@ -18,6 +18,11 @@ mkdir -p "${repository_root}/tmp"
 test_root=$(mktemp -d "${repository_root}/tmp/plugin-abi-backfill.XXXXXX")
 trap 'rm -rf -- "${test_root}"' EXIT
 mkdir -p "${test_root}/bin" "${test_root}/registry"
+# shellcheck source=tests/helpers.sh
+source "${repository_root}/tests/helpers.sh"
+ready_lock_file=${test_root}/ready.lock
+ready_lock "${repository_root}/plugin-abi.lock" "${ready_lock_file}"
+export PLUGIN_ABI_LOCK=${ready_lock_file}
 
 die() {
   printf '%s\n' "$1" >&2
@@ -52,6 +57,7 @@ other_digest=sha256:$(printf 'f%.0s' {1..64})
 child_digest=sha256:$(printf 'd%.0s' {1..64})
 config_digest=sha256:$(printf 'e%.0s' {1..64})
 release_version=$(jq -er '.abi.rulego_server.release_version' plugin-abi.lock)
+recipe_id=$(jq -er '.recipe_id' plugin-abi.lock)
 
 # `docker buildx imagetools inspect` resolves through files, and `create` records its arguments so a
 # later case can assert that nothing was written, or that exactly one write happened with the plan's
@@ -100,11 +106,12 @@ export MOCK_WRITES=${test_root}/writes
 export PATH=${test_root}/bin:${PATH}
 export REGISTRY_RETRY_ATTEMPTS=1 REGISTRY_RETRY_INITIAL_DELAY=1 REGISTRY_RETRY_MAX_DELAY=1
 
-# register_cast <index-digest> <label-revision> <release-annotation>
+# register_cast <index-digest> <label-revision> <release-annotation> [<label-recipe>]
 # Writes the three objects the writer reads: the index, its amd64 child manifest, and that child's
-# config, which is where the packaging revision lives.
+# config, which is where the packaging revision lives. The recipe label is optional because the casts
+# this plan exists for were published before the recipe split and carry none.
 register_cast() {
-  local digest=$1 label_revision=$2 annotation=$3
+  local digest=$1 label_revision=$2 annotation=$3 label_recipe=${4:-}
   jq -cn --arg digest "${digest}" --arg child "${child_digest}" --arg other "${other_digest}" \
     --arg release "${annotation}" \
     '{digest: $digest,
@@ -115,9 +122,16 @@ register_cast() {
     >"${MOCK_REGISTRY_DIR}/$(reference_file "${repo}@${digest}")"
   jq -cn --arg config "${config_digest}" '{config: {digest: $config}}' \
     >"${MOCK_REGISTRY_DIR}/$(reference_file "${repo}@${child_digest}")"
-  jq -cn --arg revision "${label_revision}" \
-    '{config: {Labels: {"org.opencontainers.image.revision": $revision}}}' \
-    >"${MOCK_REGISTRY_DIR}/$(reference_file "${repo}@${config_digest}")"
+  if [[ -n ${label_recipe} ]]; then
+    jq -cn --arg revision "${label_revision}" --arg recipe "${label_recipe}" \
+      '{config: {Labels: {"org.opencontainers.image.revision": $revision,
+                          "io.rulego.recipe.id": $recipe}}}' \
+      >"${MOCK_REGISTRY_DIR}/$(reference_file "${repo}@${config_digest}")"
+  else
+    jq -cn --arg revision "${label_revision}" \
+      '{config: {Labels: {"org.opencontainers.image.revision": $revision}}}' \
+      >"${MOCK_REGISTRY_DIR}/$(reference_file "${repo}@${config_digest}")"
+  fi
 }
 
 # write_plan <canonical-tag> <digest> <revision> <alias-tag> <host> <repository>
@@ -205,6 +219,18 @@ register_cast "${cast_digest}" "$(printf 'b%.0s' {1..40})" "${release_version}"
 expect_refusal 'bytes carry another revision' 'different packaging revision'
 register_cast "${cast_digest}" "${revision}" v0.37.0
 expect_refusal 'bytes belong to another release' 'release v0.37.0'
+register_cast "${cast_digest}" "${revision}" "${release_version}"
+
+# The name carries the current recipe fragment. A cast that labels a different recipe contradicts the
+# name it would be given, so it is refused; a cast that labels the contract recipe is named, and the
+# pre-split cast with no recipe label at all is the shape this plan exists to name.
+register_cast "${cast_digest}" "${revision}" "${release_version}" "recipe-$(printf 'a%.0s' {1..64})"
+expect_refusal 'bytes labelled with another recipe' 'those bytes carry recipe'
+register_cast "${cast_digest}" "${revision}" "${release_version}" "${recipe_id}"
+status=0
+: >"${MOCK_WRITES}"
+out=$(run_writer check 2>&1) || status=$?
+(( status == 0 )) || die "a cast labelled with the contract recipe was refused: ${out}"
 register_cast "${cast_digest}" "${revision}" "${release_version}"
 
 # A name the naming function does not produce, in the repository it does not publish, and a host it

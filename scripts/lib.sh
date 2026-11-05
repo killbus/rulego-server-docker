@@ -756,7 +756,7 @@ canonical_predecessor_abi_ids() {
 
   [[ -f ${history_file} ]] || die "Plugin ABI publication history not found: ${history_file}"
   jq -er '
-    ([.compatibility.previous_sdk.abi_id])[]' "${lock_file}"
+    ([.distribution.compatibility.previous_sdk.abi_id])[]' "${lock_file}"
   # Not `jq -e`: an empty history is a legal state, and -e reports "no output" as a failure.
   jq -r '.predecessors[] | .abi_id' "${history_file}"
 }

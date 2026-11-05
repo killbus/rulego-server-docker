@@ -78,7 +78,7 @@ set_case 'held by this contract while others are recorded' "${this_abi}" republi
 history_lock=${test_root}/history.lock
 history_file=${test_root}/history.json
 jq -cn '{abi_id: "abi-1111111111111111111111111111111111111111111111111111111111111111",
-        compatibility: {previous_sdk: {abi_id: "'${previous_abi}'"}}}' >"${history_lock}"
+        distribution: {compatibility: {previous_sdk: {abi_id: "'${previous_abi}'"}}}}' >"${history_lock}"
 printf '{ "schema_version": 1, "predecessors": [] }\n' >"${history_file}"
 [[ $(PLUGIN_ABI_HISTORY=${history_file} canonical_predecessor_abi_ids "${history_lock}") == \
   "${previous_abi}" ]] ||
@@ -273,7 +273,7 @@ export PLUGIN_ABI_NAME_REVISION="${name_revision}"
 tags=$("${repository_root}/scripts/plugin-abi.sh" render tags --candidate)
 owner=killbus
 sdk_name=$(jq -er '.sdk' <<<"${tags}")
-sdk_repository=ghcr.io/${owner}/"$(jq -er '.release.sdk_image' "${repository_root}/plugin-abi.lock")"
+sdk_repository=ghcr.io/${owner}/"$(jq -er '.distribution.release.sdk_image' "${repository_root}/plugin-abi.lock")"
 runtime_repository=ghcr.io/${owner}/$(
   "${repository_root}/scripts/plugin-abi.sh" render ci | jq -er '.runtime_image')
 {
@@ -358,7 +358,7 @@ probe_src=scripts/probe-canonical-tags.sh
 record_start=$(grep -n 'jq -cn --arg abi_id' "${probe_src}" | head -1 | cut -d: -f1)
 [[ -n ${record_start} ]] || die 'the probe record program was not found to check its bindings'
 record_end=$(grep -n '>"${record}"' "${probe_src}" | tail -1 | cut -d: -f1)
-(( ${record_end} > ${record_start} )) ||
+(( record_end > record_start )) ||
   die 'the probe record program has no closing write to check its bindings against'
 record_program=$(sed -n "${record_start},${record_end}p" "${probe_src}")
 # A field named in a jq program with no binding is a compile error on the path that writes the
@@ -372,7 +372,7 @@ jq_bound=$(printf '%s\n' "${record_program}" | grep -oE -- '--arg(json)? [a-z_]+
 jq_used=$(printf '%s\n' "${record_program}" | grep -oE '\$[a-z][a-z_0-9]*' | sed 's/^.//' | sort -u)
 jq_unbound=$(comm -13 <(printf '%s\n' "${jq_bound}") <(printf '%s\n' "${jq_used}"))
 [[ -z ${jq_unbound} ]] ||
-  die "the probe record references jq variables with no binding: $(printf '%s ' ${jq_unbound})"
+  die "the probe record references jq variables with no binding: $(printf '%s ' "${jq_unbound}")"
 # And no alias state may ever join the list that reddens the job: a pointer is not a promise, and a red
 # pull request because `v1.0.0-plugin` still serves last week's verified build is how a gate starts
 # being ignored.

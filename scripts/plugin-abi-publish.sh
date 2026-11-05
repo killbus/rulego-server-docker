@@ -46,7 +46,7 @@ sdk_sources=()
 runtime_sources='{}'
 
 verify_evidence() {
-  local arch=$1 file=$2 host_id tag_suffix staging index child expected_staging inspected
+  local arch=$1 file=$2 host_id staging index child expected_staging inspected
   [[ -f ${file} ]] || die "missing native evidence: ${file}"
   jq -e --arg arch "${arch}" --arg abi "${abi_id}" --arg lock "${lock_digest}" \
     --arg manifest "${abi_manifest_digest}" \
@@ -78,11 +78,11 @@ verify_evidence() {
       .annotations["vnd.docker.reference.digest"] == $child)] | length == 1)
   ' "${inspected}" >/dev/null || die "SDK staging image differs from native evidence for ${arch}"
 
-  while IFS=$'\t' read -r host_id tag_suffix; do
+  while IFS= read -r host_id; do
     staging=$(jq -er --arg host_id "${host_id}" '.runtime[$host_id].staging_reference' "${file}")
     index=$(jq -er --arg host_id "${host_id}" '.runtime[$host_id].index_digest' "${file}")
     child=$(jq -er --arg host_id "${host_id}" '.runtime[$host_id].child_digest' "${file}")
-    expected_staging=${runtime_repository}:staging-${packaging_revision}-${arch}${tag_suffix}
+    expected_staging=${runtime_repository}:staging-${packaging_revision}-${arch}-${host_id}
     [[ ${staging} == "${expected_staging}" ]] ||
       die "unexpected ${host_id} runtime staging reference for ${arch}"
     inspected=${TMPDIR}/runtime-${host_id}-${arch}-staging.json
@@ -95,7 +95,7 @@ verify_evidence() {
         .annotations["vnd.docker.reference.digest"] == $child)] | length == 1)
     ' "${inspected}" >/dev/null ||
       die "${host_id} runtime staging image differs from native evidence for ${arch}"
-  done < <(jq -r '.hosts[] | [.id, .tag_suffix] | @tsv' <<<"${ci_json}")
+  done < <(jq -r '.hosts[].id' <<<"${ci_json}")
 }
 
 for arch in "${arches[@]}"; do
@@ -111,18 +111,22 @@ for arch in "${arches[@]}"; do
 done
 
 index_annotations() {
-  local variant=$1 host_id=${2:-plugin} annotation
+  local variant=$1 host_id=${2:-} annotation
+  local -a args=("${variant}")
+  [[ -z ${host_id} ]] || args+=("" "${host_id}")
   INDEX_ANNOTATIONS=()
   while IFS= read -r annotation; do INDEX_ANNOTATIONS+=(--annotation "index:${annotation}"); done < <(
-    "${script_dir}/plugin-abi.sh" render metadata "${variant}" '' "${host_id}" |
+    "${script_dir}/plugin-abi.sh" render metadata "${args[@]}" |
       jq -r 'to_entries[] | "\(.key)=\(.value)"'
   )
 }
 
 create_staging_index() {
-  local variant=$1 repository=$2 host_id=$3 suffix=$4
-  shift 4
+  local variant=$1 repository=$2 host_id=$3
+  shift 3
   local staging existing status
+  local suffix=''
+  [[ -z ${host_id} ]] || suffix="-${host_id}"
   staging=${repository}:staging-${packaging_revision}${suffix}
   if existing=$(image_reference_digest "${staging}"); then
     printf '%s@%s\n' "${repository}" "${existing}"
@@ -137,15 +141,15 @@ create_staging_index() {
   printf '%s@%s\n' "${repository}" "${existing}"
 }
 
-sdk_staging_index=$(create_staging_index plugin-sdk "${sdk_repository}" plugin '' "${sdk_sources[@]}")
+sdk_staging_index=$(create_staging_index plugin-sdk "${sdk_repository}" "" "${sdk_sources[@]}")
 runtime_staging_indexes='{}'
-while IFS=$'\t' read -r host_id tag_suffix; do
+while IFS= read -r host_id; do
   mapfile -t host_sources < <(jq -r --arg host_id "${host_id}" '.[$host_id][]' <<<"${runtime_sources}")
   runtime_index=$(create_staging_index plugin-runtime "${runtime_repository}" "${host_id}" \
-    "${tag_suffix}" "${host_sources[@]}")
+    "${host_sources[@]}")
   runtime_staging_indexes=$(jq -c --arg host_id "${host_id}" --arg ref "${runtime_index}" \
     '.[$host_id] = $ref' <<<"${runtime_staging_indexes}")
-done < <(jq -r '.hosts[] | [.id, .tag_suffix] | @tsv' <<<"${ci_json}")
+done < <(jq -r '.hosts[].id' <<<"${ci_json}")
 
 verify_index_children() {
   local variant=$1 reference=$2 host_id=${3:-plugin}
@@ -242,12 +246,13 @@ PLUGIN_ABI_SIZE_REPORT=${TMPDIR}/published-sizes.tsv \
 # lock would be a second naming function, and the two could disagree without anything noticing.
 runtime_aliases=$(jq -c --arg repository "${runtime_repository}" '
   .runtime | map_values($repository + ":" + (.alias | split(":")[1]))' <<<"${tags}")
-jq -S -n --arg abi_id "${abi_id}" --arg lock_digest "${lock_digest}" \
+jq -S -n --arg abi_id "${abi_id}" --arg recipe_id "$("${script_dir}/plugin-abi.sh" render recipe-id)" \
+  --arg lock_digest "${lock_digest}" \
   --arg abi_manifest_digest "${abi_manifest_digest}" \
   --arg packaging_revision "${packaging_revision}" --arg sdk "${sdk_ref}" --argjson runtime "${runtime_refs}" \
   --argjson runtime_aliases "${runtime_aliases}" \
   --argjson superseded "${superseded_hosts}" \
-  '{abi_id:$abi_id,lock_digest:$lock_digest,abi_manifest_digest:$abi_manifest_digest,
+  '{abi_id:$abi_id,recipe_id:$recipe_id,lock_digest:$lock_digest,abi_manifest_digest:$abi_manifest_digest,
     packaging_revision:$packaging_revision,sdk:$sdk,
     runtime:$runtime,runtime_aliases:$runtime_aliases,superseded_hosts:$superseded}' \
   >"${TMPDIR}/plugin-abi-release.json"

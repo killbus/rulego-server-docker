@@ -1,14 +1,14 @@
 {
   "entries": [
     {
-      "canonical_ref": "ghcr.io/killbus/rulego-server:v1.0.0-plugin-006436e34d1f",
+      "canonical_ref": "ghcr.io/killbus/rulego-server:v1.0.0-plugin-r33955b884529-006436e34d1f",
       "digest": "sha256:53719b71a4890a39086a921c557ab2c0386de57a5450cceaad5d7fc7564f0419",
       "displaced_alias": "ghcr.io/killbus/rulego-server:v1.0.0-plugin",
       "host": "plugin",
       "packaging_revision": "006436e34d1fa2cd811f840547724fb0ace3605b"
     },
     {
-      "canonical_ref": "ghcr.io/killbus/rulego-server:v1.0.0-ai-plugin-b31cbc796318",
+      "canonical_ref": "ghcr.io/killbus/rulego-server:v1.0.0-ai-plugin-r33955b884529-b31cbc796318",
       "digest": "sha256:57ffec57766f4a9ebccf4dfcaaa2521e8af668b6fd50331913ce27ca47c0f8f7",
       "displaced_alias": "ghcr.io/killbus/rulego-server:v1.0.0-ai-plugin",
       "host": "ai-plugin",
