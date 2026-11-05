@@ -180,7 +180,7 @@
       }
     },
     "release": {
-      "state": "measurement",
+      "state": "ready",
       "sdk_image": "rulego-plugin-sdk",
       "runtime_image": "rulego-server",
       "ci": {
@@ -192,41 +192,41 @@
       "size_limits": {
         "amd64": {
           "sdk": {
-            "compressed": null,
-            "uncompressed": null
+            "compressed": 1321810972,
+            "uncompressed": 3378130479
           },
           "runtime": {
             "plugin": {
-              "compressed": null,
-              "uncompressed": null
+              "compressed": 29975790,
+              "uncompressed": 69691056
             },
             "ai-plugin": {
-              "compressed": null,
-              "uncompressed": null
+              "compressed": 40404387,
+              "uncompressed": 95583647
             },
             "all-plugin": {
-              "compressed": null,
-              "uncompressed": null
+              "compressed": 90652060,
+              "uncompressed": 225214635
             }
           }
         },
         "arm64": {
           "sdk": {
-            "compressed": null,
-            "uncompressed": null
+            "compressed": 1312747719,
+            "uncompressed": 3384524445
           },
           "runtime": {
             "plugin": {
-              "compressed": null,
-              "uncompressed": null
+              "compressed": 28750827,
+              "uncompressed": 80423589
             },
             "ai-plugin": {
-              "compressed": null,
-              "uncompressed": null
+              "compressed": 36632656,
+              "uncompressed": 102222231
             },
             "all-plugin": {
-              "compressed": null,
-              "uncompressed": null
+              "compressed": 83638446,
+              "uncompressed": 235352042
             }
           }
         }

@@ -261,11 +261,11 @@ Docker, Go, nor `readelf`—and covers release preparation, repository and image
 contracts, Plugin ABI rules, manifest validation, index assembly, and injected
 failures. The native command uses a job-local registry, consumes the SDK by
 digest, exports the
-matching host rootfs, builds both runtime hosts, verifies their `ai/agent`
+matching host rootfs, builds all three runtime hosts, verifies their `ai/agent`
 component difference, loads a host-owned ABI probe in each, proves
 wrong-architecture, wrong-ABI, and missing-libc failures, and records image
-sizes. The release record stores runtime digests under `.runtime.plugin` and
-`.runtime["ai-plugin"]`. Business-plugin repositories consume the SDK digest and own their
+sizes. The release record stores runtime digests under `.runtime.plugin`,
+`.runtime["ai-plugin"]`, and `.runtime["all-plugin"]`. Business-plugin repositories consume the SDK digest and own their
 artifact compatibility checks. Ordinary push and pull-request runs neither
 request package-write permission nor move images between jobs.
 
