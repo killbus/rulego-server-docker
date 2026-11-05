@@ -13,6 +13,27 @@ on:
         required: false
         default: false
         type: boolean
+      promote_aliases:
+        description: Move the v<release>-<host> aliases; set false when publishing an older release
+        required: false
+        default: true
+        type: boolean
+  workflow_call:
+    inputs:
+      publish:
+        description: Publish release-ready immutable ABI tags to GHCR
+        required: true
+        type: boolean
+      staging_only:
+        description: Build and stage commit-qualified images only, publishing no immutable ABI tag
+        required: false
+        default: false
+        type: boolean
+      promote_aliases:
+        description: Move the v<release>-<host> aliases to the indexes this run verified
+        required: false
+        default: true
+        type: boolean
 
 permissions:
   contents: read
@@ -37,13 +58,18 @@ jobs:
       - name: Render native matrix
         id: contract
         env:
-          REQUESTED_PUBLISH: ${{ github.event.inputs.publish }}
-          REQUESTED_STAGING_ONLY: ${{ github.event.inputs.staging_only }}
+          REQUESTED_PUBLISH: ${{ inputs.publish }}
+          REQUESTED_STAGING_ONLY: ${{ inputs.staging_only }}
+          REQUESTED_PROMOTE_ALIASES: ${{ inputs.promote_aliases }}
         run: |
           # A dispatch with both flags false would skip every downstream job and
           # report success without exercising the pipeline, so it is rejected.
           if [[ $REQUESTED_PUBLISH != true && $REQUESTED_STAGING_ONLY != true ]]; then
             echo 'dispatch requires publish=true or staging_only=true' >&2
+            exit 1
+          fi
+          if [[ $REQUESTED_PROMOTE_ALIASES != true && $REQUESTED_PROMOTE_ALIASES != false ]]; then
+            echo 'promote_aliases must be true or false' >&2
             exit 1
           fi
           if [[ $REQUESTED_PUBLISH == true ]]; then
@@ -91,7 +117,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PLUGIN_ABI_STAGE: "true"
-          PLUGIN_ABI_PUBLISH: ${{ github.event.inputs.publish }}
+          PLUGIN_ABI_PUBLISH: ${{ inputs.publish }}
         run: scripts/plugin-abi-build.sh "${{ matrix.goarch }}"
       - name: Upload native evidence
         # actions/upload-artifact v4
@@ -143,9 +169,13 @@ jobs:
       # outcome and has to fail the job: the canonical name holds this build, the human-level name
       # still points at an earlier one, and `tmp/alias-moves` says whether anything moved at all.
       - name: Promote runtime aliases to the verified build
+        if: ${{ inputs.promote_aliases }}
         env:
           PROMOTE_ALIAS_RECORD_DIR: ${{ github.workspace }}/tmp/alias-moves
         run: scripts/promote-runtime-aliases.sh tmp/plugin-abi-release.json
+      - name: Record withheld aliases
+        if: ${{ !inputs.promote_aliases }}
+        run: echo 'Runtime aliases were not moved because promote_aliases=false.' >>"$GITHUB_STEP_SUMMARY"
       - name: Upload release record
         # actions/upload-artifact v4
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02

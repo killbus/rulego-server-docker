@@ -34,6 +34,8 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     outputs:
+      abi_ready: ${{ steps.abi.outputs.ready }}
+      abi_release_version: ${{ steps.abi.outputs.release_version }}
       image: ${{ steps.release.outputs.image }}
       is_latest: ${{ steps.release.outputs.is_latest }}
       should_build: ${{ steps.release.outputs.should_build }}
@@ -45,6 +47,22 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
+
+      - name: Read the Plugin ABI release contract
+        id: abi
+        run: |
+          # A null or unknown state is not ready. Do not let `set -e` turn that
+          # answer into a failed resolve job: the release must still publish its
+          # legacy images when the ABI lock is only a measurement candidate.
+          state=$(jq -er '.distribution.release.state' plugin-abi.lock)
+          ready=false
+          if [[ ${state} == ready ]]; then
+            ready=true
+          fi
+          {
+            echo "release_version=$(jq -er '.abi.rulego_server.release_version' plugin-abi.lock)"
+            echo "ready=${ready}"
+          } >>"$GITHUB_OUTPUT"
 
       - name: Set up Docker Buildx
         # docker/setup-buildx-action v4.3.0
@@ -67,6 +85,8 @@ jobs:
           REQUESTED_FORCE: ${{ github.event.inputs.force }}
           REQUESTED_VERSION: ${{ github.event.inputs.version }}
           REQUESTED_STAGING_ONLY: ${{ github.event.inputs.staging_only }}
+          ABI_RELEASE_VERSION: ${{ steps.abi.outputs.release_version }}
+          ABI_READY: ${{ steps.abi.outputs.ready }}
         shell: bash
         run: |
           set -Eeuo pipefail
@@ -124,6 +144,18 @@ jobs:
           } >>"$GITHUB_OUTPUT"
 
           echo "Selected ${version}; current stable=${latest_version}; build=${should_build}; force=${force}; staging_only=${staging_only}"
+          if [[ $ABI_READY != true ]]; then
+            echo "Plugin ABI publish skipped: lock state is not ready." >>"$GITHUB_STEP_SUMMARY"
+          elif [[ $version != "$ABI_RELEASE_VERSION" ]]; then
+            echo "Plugin ABI publish skipped: upstream ${version} does not match lock ${ABI_RELEASE_VERSION}." >>"$GITHUB_STEP_SUMMARY"
+          elif [[ $staging_only == true ]]; then
+            echo "Plugin ABI publish skipped: staging-only run." >>"$GITHUB_STEP_SUMMARY"
+          elif [[ $should_build == false ]]; then
+            echo "Plugin ABI publish skipped: the legacy release is already complete." >>"$GITHUB_STEP_SUMMARY"
+          else
+            if [[ $is_latest == true ]]; then alias_note='aliases will move'; else alias_note='aliases stay put'; fi
+            echo "Plugin ABI publish queued for ${version}; ${alias_note}." >>"$GITHUB_STEP_SUMMARY"
+          fi
 
   build:
     name: Build ${{ matrix.variant }} image on ${{ matrix.architecture }}
@@ -362,3 +394,27 @@ jobs:
           # failure buries the first one. The record is what matters precisely when the promotion
           # failed partway, and in that case the file exists.
           if-no-files-found: ignore
+
+  publish-plugin-abi:
+    name: Publish Plugin ABI images
+    needs: [resolve, publish]
+    # The legacy images must be verified first. The ABI contract is a second,
+    # independent release surface: it only runs for a real build of the exact
+    # version the lock pins, and it never writes public names from staging.
+    if: >-
+      needs.resolve.outputs.should_build == 'true' &&
+      needs.resolve.outputs.staging_only == 'false' &&
+      needs.resolve.outputs.abi_ready == 'true' &&
+      needs.resolve.outputs.version == needs.resolve.outputs.abi_release_version &&
+      needs.publish.result == 'success'
+    permissions:
+      contents: read
+      packages: write
+    uses: ./.github/workflows/plugin-abi-publish.yml
+    with:
+      publish: true
+      staging_only: false
+      # An older release may publish its immutable canonicals, but it must not
+      # move the human-level alias backwards over a newer release.
+      promote_aliases: ${{ needs.resolve.outputs.is_latest == 'true' }}
+    secrets: inherit

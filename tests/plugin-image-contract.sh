@@ -115,11 +115,33 @@ assert_contains scripts/plugin-abi-build.sh '-gcflags=all=-N'
 verify_workflow=.github/workflows/plugin-abi.yml
 publish_workflow=.github/workflows/plugin-abi-publish.yml
 backfill_workflow=.github/workflows/plugin-abi-backfill.yml
+release_workflow=.github/workflows/publish.yml
 assert_contains "${verify_workflow}" 'run: scripts/plugin-abi-build.sh "${{ matrix.goarch }}"'
 assert_contains "${publish_workflow}" 'run: scripts/plugin-abi-build.sh "${{ matrix.goarch }}"'
 assert_contains "${publish_workflow}" 'run: scripts/plugin-abi-publish.sh tmp/evidence'
 assert_contains "${publish_workflow}" 'environment: plugin-abi-release'
 assert_contains "${publish_workflow}" 'packages: write'
+# The ABI workflow is also the reusable half of the normal release flow. It must accept a caller,
+# use the same `inputs` context for both entry points, and let the caller withhold alias movement
+# when it is publishing an older stable release.
+assert_contains "${publish_workflow}" 'workflow_call:'
+assert_contains "${publish_workflow}" 'promote_aliases:'
+assert_contains "${publish_workflow}" 'if: ${{ inputs.promote_aliases }}'
+if grep -Fq 'github.event.inputs.publish' "${publish_workflow}"; then
+  echo 'a reusable workflow reads dispatch-only inputs and will break when called' >&2
+  exit 1
+fi
+assert_contains "${release_workflow}" 'uses: ./.github/workflows/plugin-abi-publish.yml'
+assert_contains "${release_workflow}" "needs.resolve.outputs.version == needs.resolve.outputs.abi_release_version"
+assert_contains "${release_workflow}" "needs.resolve.outputs.should_build == 'true'"
+assert_contains "${release_workflow}" "needs.resolve.outputs.staging_only == 'false'"
+assert_contains "${release_workflow}" "needs.resolve.outputs.abi_ready == 'true'"
+assert_contains "${release_workflow}" "needs.publish.result == 'success'"
+assert_contains "${release_workflow}" 'promote_aliases: ${{ needs.resolve.outputs.is_latest == '\''true'\'' }}'
+if grep -Fq 'if: always()' <<<"$(sed -n '/^  publish-plugin-abi:/,/^$/p' "${release_workflow}")"; then
+  echo 'the ABI publication job can run after a failed legacy publication' >&2
+  exit 1
+fi
 # The alias promotion is a separate step, run after the immutable names are written and verified. Its
 # position is the contract: a step that moved `v1.0.0-<host>` before verification would advertise
 # content nothing checked, and that is the exact ordering the two-phase publication exists to forbid.

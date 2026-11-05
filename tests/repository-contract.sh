@@ -93,6 +93,9 @@ assert_contains "${workflow}" "uses: actions/upload-artifact@ea165f8d65b6e75b540
 assert_contains "${workflow}" "uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093"
 
 while IFS= read -r action_reference; do
+  # A reusable workflow in this same commit has no external ref to pin: the
+  # immutable revision is the commit that contains both files.
+  [[ ${action_reference} == ./* ]] && continue
   action_revision=${action_reference##*@}
   [[ ${action_revision} =~ ^[0-9a-f]{40}$ ]] || {
     printf 'workflow contains a non-immutable action reference: %s\n' "${action_reference}" >&2
