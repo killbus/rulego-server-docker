@@ -29,15 +29,14 @@ attestation=sha256:$(printf '0%.0s' {1..64})
 # mock has to answer for that reference too, not only for the tag and the index.
 config_digest=sha256:$(printf '9%.0s' {1..64})
 
-# The revision stands for an earlier release: the same contract shape, one different packaging
-# generation, therefore a different identity. It cannot be HEAD, because a lock may not record itself
-# as its own predecessor; pasting HEAD's identity would only ever exercise that schema rule.
+# The revision stands for an earlier release: a published generation with its own identity. It cannot
+# be HEAD, because a lock may not record itself as its own predecessor; pasting HEAD's identity would
+# only ever exercise that schema rule.
 work_lock=$(git show HEAD:plugin-abi.lock)
-previous_abi_id=$(jq -S -c '.abi | .packaging.version = "9"' <<<"${work_lock}" | tr -d '\r' |
-  { sha256sum | awk '{print "abi-" $1}'; })
-jq -S --arg abi_id "${previous_abi_id}" '.abi.packaging.version = "9" | .abi_id = $abi_id' \
-  <<<"${work_lock}" >"${test_root}/repo/plugin-abi.lock"
-sdk_image=$(jq -er '.release.sdk_image' "${test_root}/repo/plugin-abi.lock")
+previous_abi_id=$(jq -er '.abi_id' <<<"${work_lock}")
+printf '%s\n' "${work_lock}" >"${test_root}/repo/plugin-abi.lock"
+sdk_image=$(jq -er '.distribution.release.sdk_image // .release.sdk_image' \
+  "${test_root}/repo/plugin-abi.lock")
 # One mock file per reference. The registry stand-in keys on the last path component with `:` and `@`
 # turned into `_`, so every writer here has to use the same transform: a tag, an index read by digest
 # and an image config are three different references that all live in this one directory.
@@ -207,10 +206,10 @@ jq -e --arg abi "${previous_abi_id}" --arg repository "ghcr.io/killbus/${sdk_ima
 
 # What it prints must be legal where it is pasted: a block the schema rejects would turn a routine
 # rotation into a red release, which is the failure this helper exists to remove, not repackage.
-jq --argjson block "${derived}" '.compatibility.previous_sdk = $block' plugin-abi.lock \
+jq --argjson block "${derived}" '.distribution.compatibility.previous_sdk = $block' plugin-abi.lock \
   >"${test_root}/stamped.lock"
 PLUGIN_ABI_LOCK=${test_root}/stamped.lock scripts/plugin-abi.sh validate --candidate >/dev/null || {
-  echo 'the derived block is not a legal .compatibility.previous_sdk' >&2
+  echo 'the derived block is not a legal .distribution.compatibility.previous_sdk' >&2
   exit 1
 }
 
@@ -230,7 +229,7 @@ refusal 'an index without linux/amd64' 'does not hold exactly one linux/amd64' d
 # rather than answered with a block of placeholders.
 register "${previous_commit}"
 mv "$(reference_file)" "${test_root}/stored"
-refusal 'a canonical tag that is not published' 'no published SDK tag to derive' derive HEAD
+refusal 'a canonical tag that is not published' 'no published SDK tag carries' derive HEAD
 mv "${test_root}/stored" "$(reference_file)"
 
 # An unreachable registry is not evidence about availability, and must not be reported as an absent
@@ -246,13 +245,42 @@ jq -cn --arg digest "${index_digest}" --arg amd64 "${amd64_child}" --arg arm64 "
      {platform: {os:"linux", architecture:"amd64"}, digest: $amd64},
      {platform: {os:"linux", architecture:"arm64"}, digest: $arm64}]}' \
   >"${MOCK_REGISTRY_DIR}/response-1.json"
-jq -cn --arg digest "${moved_digest}" --arg amd64 "${amd64_child}" --arg arm64 "${arm64_child}" \
+jq -cn --arg digest "${index_digest}" --arg amd64 "${amd64_child}" --arg arm64 "${arm64_child}" \
   --arg abi "${previous_abi_id}" \
   '{digest: $digest, annotations: {"io.rulego.abi.id": $abi}, manifests: [
      {platform: {os:"linux", architecture:"amd64"}, digest: $amd64},
      {platform: {os:"linux", architecture:"arm64"}, digest: $arm64}]}' \
   >"${MOCK_REGISTRY_DIR}/response-2.json"
+jq -cn --arg digest "${moved_digest}" --arg amd64 "${amd64_child}" --arg arm64 "${arm64_child}" \
+  --arg abi "${previous_abi_id}" \
+  '{digest: $digest, annotations: {"io.rulego.abi.id": $abi}, manifests: [
+     {platform: {os:"linux", architecture:"amd64"}, digest: $amd64},
+     {platform: {os:"linux", architecture:"arm64"}, digest: $arm64}]}' \
+  >"${MOCK_REGISTRY_DIR}/response-3.json"
 refusal 'a tag that moved between the two reads' 'not the digest the tag resolves to' derive_two_reads
+
+# Two naming generations for one identity: the pre-split `abi-<id>` and the recipe-qualified
+# `abi-<id>-r<recipe12>`. The record stores only the identity, so an identity answering to two sets of
+# bytes does not name one release and is refused rather than guessed. When both names carry the same
+# bytes the pre-split name is kept, because that is the name the generation was published under.
+recipe_tag="${previous_abi_id}-r$(printf '1%.0s' {1..12})"
+write_index() {
+  local digest=$1
+  jq -cn --arg digest "${digest}" --arg amd64 "${amd64_child}" --arg arm64 "${arm64_child}" \
+    --arg abi "${previous_abi_id}" \
+    '{digest: $digest, annotations: {"io.rulego.abi.id": $abi}, manifests: [
+       {platform: {os:"linux", architecture:"amd64"}, digest: $amd64},
+       {platform: {os:"linux", architecture:"arm64"}, digest: $arm64}]}'
+}
+write_index "${moved_digest}" >"$(ref_file "${sdk_image}:${recipe_tag}")"
+jq -cn --arg abi "${previous_abi_id}" --arg tag "${recipe_tag}" '["latest", $abi, $tag]' >"${MOCK_TAG_LIST}"
+refusal 'one identity under two names holding different bytes' 'more than one set of bytes' derive HEAD
+write_index "${index_digest}" >"$(ref_file "${sdk_image}:${recipe_tag}")"
+same_bytes=$(derive HEAD) || die 'the same bytes under both names were refused'
+[[ ${same_bytes} == "${derived}" ]] ||
+  die "both names holding one generation derived something else: ${same_bytes}"
+jq -cn --arg abi "${previous_abi_id}" '["latest", $abi]' >"${MOCK_TAG_LIST}"
+rm -f "$(ref_file "${sdk_image}:${recipe_tag}")"
 
 # check mode: the record already in a lock is compared with the registry, which is the half that
 # makes a mistyped rotation impossible to ship. The mock registry still holds the published index, so
@@ -261,14 +289,14 @@ refusal 'a tag that moved between the two reads' 'not the digest the tag resolve
 # so a check that re-derived the name from the caller would pass while proving nothing about the
 # record it was asked about.
 record_lock=${test_root}/record.lock
-jq --argjson block "${derived}" '.compatibility.previous_sdk = $block' plugin-abi.lock >"${record_lock}"
+jq --argjson block "${derived}" '.distribution.compatibility.previous_sdk = $block' plugin-abi.lock >"${record_lock}"
 check_ownerless "${record_lock}" >/dev/null || {
   echo 'the check refused a record that matches the published index' >&2
   exit 1
 }
 
 # The tag resolves to bytes the record does not name: the record was written for a different build.
-jq --arg other "${moved_digest}" '.compatibility.previous_sdk.index_digest = $other' "${record_lock}" \
+jq --arg other "${moved_digest}" '.distribution.compatibility.previous_sdk.index_digest = $other' "${record_lock}" \
   >"${test_root}/wrong-index.lock"
 refusal 'a record naming a different index than the tag resolves to' 'does not match the registry' \
   check "${test_root}/wrong-index.lock"
@@ -276,7 +304,7 @@ refusal 'a record naming a different index than the tag resolves to' 'does not m
 # A child digest typed one digit wrong is the exact failure the record used to hide, because every
 # offline rule approves a well-formed digest.
 for arch in amd64 arm64; do
-  jq --arg arch "${arch}" '.compatibility.previous_sdk.children[$arch] =
+  jq --arg arch "${arch}" '.distribution.compatibility.previous_sdk.children[$arch] =
       ("sha256:" + ("e" * 64))' "${record_lock}" >"${test_root}/wrong-${arch}.lock"
   refusal "a record naming a different linux/${arch} image" "does not name the published linux/${arch}" \
     check "${test_root}/wrong-${arch}.lock"

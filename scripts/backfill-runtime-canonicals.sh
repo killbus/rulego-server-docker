@@ -10,6 +10,8 @@
 #   * its digest and revision are well formed and the revision is a commit of this checkout;
 #   * the bytes at that digest carry that same revision in their own child config;
 #   * those bytes label the same product version the current lock releases;
+#   * those bytes do not label a recipe other than the one the naming function names them with
+#     (casts cut before the recipe split carry no recipe label at all);
 #   * the planned name equals what `render tags` derives for that revision, and the alias it was
 #     displaced from equals the alias the same derivation produces;
 #   * the target name is absent, or already holds exactly these bytes.
@@ -55,8 +57,9 @@ if [[ ${mode} == check || ${mode} == apply ]]; then
 fi
 
 release_version=$(jq -er '.abi.rulego_server.release_version' "${repository_root}/plugin-abi.lock")
-runtime_image=$(jq -er '.release.runtime_image' "${repository_root}/plugin-abi.lock")
-locked_hosts=$(jq -r '.abi.build.hosts[].id' "${repository_root}/plugin-abi.lock" | sort -u | paste -sd, -)
+runtime_image=$(jq -er '.distribution.release.runtime_image' "${repository_root}/plugin-abi.lock")
+recipe_id=$(jq -er '.recipe_id' "${repository_root}/plugin-abi.lock")
+locked_hosts=$(jq -r '.distribution.hosts[].id' "${repository_root}/plugin-abi.lock" | sort -u | paste -sd, -)
 
 # `cast_config_label` and `index_annotation` come from lib.sh, which needs the same reads to date a
 # published generation; a second copy here would be a second thing to keep correct.
@@ -122,6 +125,15 @@ for ((index = 0; index < count; index += 1)); do
   fi
   [[ ${cast_release} == "${release_version}" ]] \
     || die "entry ${host}: those bytes are release ${cast_release}, the contract releases ${release_version}"
+  # The name this plan mints carries the current recipe fragment. Casts cut before the recipe split
+  # carry no recipe label, so for them the name is the naming function's answer for the revision, which
+  # is the whole basis of this plan. A cast that does carry a recipe label has to agree with the lock:
+  # otherwise the name would claim a recipe the bytes themselves contradict.
+  if ! cast_recipe=$(cast_config_label "${planned%:*}" "${digest}" io.rulego.recipe.id); then
+    die "entry ${host}: the registry could not answer what recipe those bytes carry, and silence is not evidence"
+  fi
+  [[ ${cast_recipe} == unlabelled || ${cast_recipe} == "${recipe_id}" ]] \
+    || die "entry ${host}: those bytes carry recipe ${cast_recipe}, the naming function names them with ${recipe_id}"
 
   status=0
   holding=$(image_reference_digest "${planned}") || status=$?

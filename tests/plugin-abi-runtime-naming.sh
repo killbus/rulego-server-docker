@@ -16,6 +16,8 @@ script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 repository_root=$(cd -- "${script_dir}/.." && pwd)
 # shellcheck source=scripts/lib.sh
 source "${repository_root}/scripts/lib.sh"
+# shellcheck source=tests/helpers.sh
+source "${repository_root}/tests/helpers.sh"
 
 mkdir -p "${repository_root}/tmp"
 test_root=$(mktemp -d "${repository_root}/tmp/plugin-abi-runtime-naming.XXXXXX")
@@ -25,6 +27,12 @@ die() {
   printf '%s\n' "$1" >&2
   exit 1
 }
+
+# Release-mode rendering refuses a lock that is still measuring, so the naming tests
+# exercise the writing side against the shape a ready lock has.
+ready_lock_file=${test_root}/ready.lock
+ready_lock "${repository_root}/plugin-abi.lock" "${ready_lock_file}"
+export PLUGIN_ABI_LOCK=${ready_lock_file}
 
 rev_a=$(printf 'a%.0s' {1..40})
 rev_b=$(printf 'b%.0s' {1..40})
@@ -47,14 +55,15 @@ refusal() {
 tags_a=$(render "${rev_a}")
 tags_b=$(render "${rev_b}")
 tags_none=$(render none)
+recipe_tag=$(jq -er '.recipe_id | sub("^recipe-"; "") | .[0:12]' "${ready_lock_file}")
 
 # Every host carries both tracks, and they are never the same string. A canonical name equal to its
 # alias would put a moving name under the first-writer promise, so the next verified build could not
 # be promoted at all.
 while IFS=$'\t' read -r host_id canonical alias; do
   [[ ${canonical} != "${alias}" ]] || die "${host_id}: canonical and alias are the same name"
-  [[ ${canonical} == "${alias}-${rev_a:0:12}" ]] ||
-    die "${host_id}: canonical ${canonical} is not ${alias} plus the packaging revision"
+  [[ ${canonical} == "${alias}-r${recipe_tag}-${rev_a:0:12}" ]] ||
+    die "${host_id}: canonical ${canonical} is not ${alias} plus the recipe and packaging revision"
   [[ ${alias} =~ ^rulego-server:v[0-9]+\.[0-9]+\.[0-9]+-[a-z0-9-]+$ ]] ||
     die "${host_id}: alias ${alias} left the published naming shape"
 done < <(jq -r '.runtime | to_entries[] | [.key, .value.canonical, .value.alias] | @tsv' <<<"${tags_a}")
@@ -108,7 +117,7 @@ refusal 'render tags refuses a non-hex packaging revision' env PLUGIN_ABI_NAME_R
 
 # The plan the gate walks is a set of first-writer promises, so it carries every canonical name, the
 # alias of no host, and nothing at all for a name no build has won yet.
-host_count=$(jq -r '.abi.build.hosts | length' "${repository_root}/plugin-abi.lock")
+host_count=$(jq -r '.distribution.hosts | length' "${ready_lock_file}")
 plan_a=$(canonical_tag_plan "${tags_a}" killbus)
 plan_none=$(canonical_tag_plan "${tags_none}" killbus)
 plan_a_lines=$(wc -l <<<"${plan_a}" | tr -d ' ')
@@ -131,9 +140,11 @@ printf 'plugin-sdk\tghcr.io/killbus/rulego-plugin-sdk:abi-x\nruntime-plugin\tghc
   >"${test_root}/two-line.tsv"
 printf 'plugin-sdk\tghcr.io/killbus/rulego-plugin-sdk:abi-x\nruntime-plugin\tghcr.io/killbus/rulego-server:v1.0.0-plugin-aaaaaaaaaaaa\nruntime-ai-plugin\tghcr.io/killbus/rulego-server:v1.0.0-ai-plugin-aaaaaaaaaaaa\n' \
   >"${test_root}/three-line.tsv"
-require_canonical_plan_lines "${test_root}/three-line.tsv" 2
-refusal 'a plan missing a host is refused' require_canonical_plan_lines "${test_root}/two-line.tsv" 2
-refusal 'a plan with an extra line is refused' require_canonical_plan_lines "${test_root}/three-line.tsv" 1
+printf 'plugin-sdk\tghcr.io/killbus/rulego-plugin-sdk:abi-x\nruntime-plugin\tghcr.io/killbus/rulego-server:v1.0.0-plugin-aaaaaaaaaaaa\nruntime-ai-plugin\tghcr.io/killbus/rulego-server:v1.0.0-ai-plugin-aaaaaaaaaaaa\nruntime-all-plugin\tghcr.io/killbus/rulego-server:v1.0.0-all-plugin-aaaaaaaaaaaa\n' \
+  >"${test_root}/four-line.tsv"
+require_canonical_plan_lines "${test_root}/four-line.tsv" 3
+refusal 'a plan missing a host is refused' require_canonical_plan_lines "${test_root}/three-line.tsv" 3
+refusal 'a plan with an extra line is refused' require_canonical_plan_lines "${test_root}/four-line.tsv" 2
 
 # Publication still renders its own names and still exports the identity it renders them from, so the
 # plan the probe walks and the plan the gate reads cannot drift into naming different objects.

@@ -185,7 +185,7 @@ if [[ -n ${record} ]]; then
   # object. Measured on PR #13, whose first record carried the merge ref. `not-in-ci` is permitted
   # only when neither source exists, and is rejected as a value rather than guessed at.
   jq -cn --arg abi_id "${abi_id}" --arg lock_digest "${lock_digest}" \
-    --arg previous_abi_id "$(jq -er '.compatibility.previous_sdk.abi_id' "${lock}")" \
+    --arg previous_abi_id "$(jq -er '.distribution.compatibility.previous_sdk.abi_id' "${lock}")" \
     --arg revision "${revision}" --arg name_revision "${PLUGIN_ABI_NAME_REVISION}" \
     --argjson results "${results}" \
     --argjson alias_results "${alias_results}" \

@@ -51,35 +51,35 @@ host distributor -> plugin-abi.lock -> SDK image digest -> plugin .so + ABI side
                                   \-> runtime image digest -> loads the external .so
 ```
 
-The SDK discovery tag is `rulego-plugin-sdk:<abi_id>`, and one SDK serves both plugin-capable hosts.
+The SDK discovery tag is `rulego-plugin-sdk:<abi_id>-r<recipe12>`, and one SDK serves all three
+plugin-capable hosts.
 
-Note: `<abi_id>` hashes the full `.abi` closure **including** `.abi.build.hosts`,
-so adding a variant changes `abi_id` and mints a new SDK name. Each host set is a
-distinct ABI identity until the identity domain is narrowed (contract pending).
+`<abi_id>` hashes only the `.abi` closure: the compiler, flags, module graph, native toolchain and
+source revisions that decide whether `plugin.Open` succeeds. Hosts, compatibility, release policy
+and image names are distribution, not ABI, and live under `.distribution`; adding or renaming a
+host does not mint a new SDK identity.
 
-The closure also carries `.abi.packaging.version`, the packaging generation. It is
-there because the recipe decides the artifact bytes: the two Dockerfiles, the flags
-they pass, and where the ABI manifest is written. Bump it whenever a change would
-alter published bytes without altering any other field in `.abi`, so that the new
-bytes arrive under a name nobody has spent. Leaving the generation alone while the
-recipe changed puts two different artifacts in contention for one immutable tag, and
-the only answer left to the publish gate is to wait for a version nobody controls.
-Three fields in the release half of the lock belong to that rule rather than being exempt from it,
-because they genuinely decide bytes: `reproducible_epoch`, the `manifest_path` the identity document
-is written to, and the editor payload. Editing any of them without advancing the generation is an
-identity conflict, and the remedy is local -- the generation moves, the name moves with it.
+The recipe is a second identity, `recipe_id`, hashing `.distribution.recipe`: the Dockerfiles, the
+build scripts, the editor payload, the path the ABI manifest is written to, the reproducible epoch,
+and the pinned file digests. A change that would alter published bytes without altering `.abi`
+moves `recipe_id` and therefore every canonical name, while leaving `abi_id` alone. The two axes are
+independent: an ABI change moves `abi_id`, a recipe change moves `recipe_id`, and a host or release
+policy change moves neither.
 
-The two plugin-capable hosts are `plugin`, the standard host without optional component tags, and
-`ai-plugin`, built with `with_ai` and including `ai/agent`. The same ABI-compatible plugin loads in
-either runtime.
+The three plugin-capable hosts are `plugin`, built with no optional component tags; `ai-plugin`,
+built with `with_ai` and including `ai/agent`; and `all-plugin`, built with `with_all`. The
+`all-plugin` host is the optional-component union, not an alias of `ai-plugin`, and today its tags
+include `ai/agent`. The same ABI-compatible plugin loads in any of the three runtimes.
 
 Each host gets two public names, because one name cannot be a promise and an address at the same
 time:
 
-- the canonical name `rulego-server:v1.0.0-<host>-<packaging commit, first 12>` is won by one build
-  and never moved. First-writer applies: a rerun of the same commit re-wins the same name and can
-  compare equal to its own content, and any new commit arrives under a name nobody has spent.
-- the alias `rulego-server:v1.0.0-plugin` or `rulego-server:v1.0.0-ai-plugin` is the human-level name.
+- the canonical name `rulego-server:v1.0.0-<host>-r<recipe12>-<packaging commit, first 12>` is won
+  by one build and never moved. First-writer applies: a rerun of the same commit re-wins the same
+  name and can compare equal to its own content, and any new commit or recipe arrives under a name
+  nobody has spent.
+- the alias `rulego-server:v1.0.0-plugin`, `rulego-server:v1.0.0-ai-plugin` or
+  `rulego-server:v1.0.0-all-plugin` is the human-level name.
   It moves, and only through `scripts/promote-runtime-aliases.sh`, after the canonical build it will
   point at has been verified.
   Within one `release_version` it means "the newest verified build of this release line"; it cannot
@@ -88,8 +88,8 @@ time:
 
 Pin a digest from `plugin-abi-release.json`, or pin a canonical name. Pin an alias only when what you
 want is "whatever this release line has currently verified", and then resolve it to a digest before
-shipping. The SDK discovery tag `rulego-plugin-sdk:<abi_id>` has no alias: it is named by the identity
-it carries, so it is always the first kind of name.
+shipping. The SDK discovery tag `rulego-plugin-sdk:<abi_id>-r<recipe12>` has no alias: it is named by
+the ABI and recipe it carries, so it is always the first kind of name.
 
 Content, not the commit that packaged it, still decides what a published name holds. The image
 annotations name the source revision recorded in the lock, and the commit that ran a build appears in
@@ -118,12 +118,9 @@ refused a batch whose own names were all free. Each history entry names an `abi_
 `reason`, because a predecessor list nobody can justify is indistinguishable from one written to pass
 a gate. The file lives outside the lock because it is publication history, not a build input: it
 records what was already shipped, and nothing a compiler reads depends on it. The manifest the images
-carry is derived from `.abi` alone, so the release half of the lock reaches an image only through the
-three fields that genuinely decide bytes -- `reproducible_epoch`, `manifest_path` and the editor
-payload -- and a change to any of those is a packaging-generation bump, not a silent edit under a
-name that is already spent.
-An `-all-plugin` host is reserved for a later release and is not produced by
-this contract.
+carry is derived from `.abi` alone. `.distribution` reaches an image only through the recipe --
+`reproducible_epoch`, `manifest_path` and the editor payload, all under `.distribution.recipe` -- and
+a change to any of those moves `recipe_id`, not `abi_id`.
 
 Given a reviewed release record downloaded from the matching workflow run, the
 minimal build is:
@@ -288,7 +285,9 @@ the last build that passed, which is the property a moving name has to have to b
 Two runtime casts were published before per-build canonical names existed, and the alias promotion
 above took their only names. [The backfill workflow](.github/workflows/plugin-abi-backfill.yml)
 gives them the names the naming function produces for the packaging revision each image carries in
-its own config, from `plugin-abi-backfill.json`. It is dispatch-only and its `apply` input must be
+its own config, from `plugin-abi-backfill.json`. A cast that labels a recipe other than the one
+its name would carry is refused; the pre-split casts that carry no recipe label are exactly what
+the plan names. It is dispatch-only and its `apply` input must be
 `true` to write; a dispatch with `apply=false` re-derives everything and touches nothing. Every
 target must be absent or already hold exactly those bytes, so a name that holds other content is a
 refusal rather than a rewrite. The record it uploads is labelled with the moment it describes:
@@ -320,7 +319,7 @@ the registry, so the helper names it.
 
 ```bash
 block=$(scripts/derive-compatibility-sdk.sh derive auto)
-jq --argjson block "${block}" '.compatibility.previous_sdk = $block' \
+jq --argjson block "${block}" '.distribution.compatibility.previous_sdk = $block' \
   plugin-abi.lock >next.lock && mv next.lock plugin-abi.lock
 scripts/plugin-abi.sh validate --candidate
 ```
@@ -346,7 +345,9 @@ not a digest, a tag nobody published, a registry that would not answer, an index
 annotating an identity other than the tag it answers to, an index missing an architecture,
 an index that resolves both architectures to one digest, an image built from a commit that
 is not the one asked about, a commit that is here but carries no contract or a different
-one, or a tag that moved between its two reads.
+one, one identity answering to two published names that hold different bytes -- the record
+stores only the identity, so a second set of bytes is not one release -- or a tag that moved
+between its two reads.
 
 An unreachable commit is not on that list, and that is a measured fact rather than a
 preference: of the published SDK tags in this repository, one cites a commit that no

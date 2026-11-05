@@ -5,6 +5,8 @@ set -Eeuo pipefail
 script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 repository_root=$(cd -- "${script_dir}/.." && pwd)
 cd "${repository_root}"
+# shellcheck source=tests/helpers.sh
+source "${script_dir}/helpers.sh"
 
 mkdir -p "${repository_root}/tmp"
 test_root=$(mktemp -d "${repository_root}/tmp/fetch-plugin-editor.XXXXXX")
@@ -14,8 +16,9 @@ printf '<html>editor</html>\n' >"${test_root}/payload/editor/index.html"
 printf 'not copied\n' >"${test_root}/payload/rulego-server-linux-amd64"
 tar -C "${test_root}/payload" -czf "${test_root}/editor.tar.gz" editor rulego-server-linux-amd64
 archive_sha=$(sha256sum "${test_root}/editor.tar.gz" | awk '{print $1}')
-jq --arg sha "${archive_sha}" '.release.editor_payload.asset.sha256 = $sha' \
+jq --arg sha "${archive_sha}" '.distribution.recipe.editor_payload.asset.sha256 = $sha' \
   plugin-abi.lock >"${test_root}/lock.json"
+refresh_recipe_id "${test_root}/lock.json"
 
 cat >"${test_root}/bin/curl" <<'EOF'
 #!/usr/bin/env bash

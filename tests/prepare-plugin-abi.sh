@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# shellcheck disable=SC2016,SC2031
 
 set -Eeuo pipefail
 
@@ -165,7 +166,7 @@ cmp -s "${output}/manifest/plugin-abi.json" "${output}/stage-root/usr/share/rule
 # directories that git checkout and the editor fetcher create, must carry the
 # locked epoch and canonical modes rather than the state of whoever ran the
 # preparation. assert_staged is the shipped probe, not a copy of its logic.
-epoch=$(jq -r '.release.reproducible_epoch' "${test_root}/lock.json")
+epoch=$(jq -r '.distribution.recipe.reproducible_epoch' "${test_root}/lock.json")
 assert_staged() {
   local root=$1
   (
@@ -218,12 +219,17 @@ done < <(
   grep -o '\${context}/[A-Za-z0-9._/-]*' "${driver}" |
     sed 's|^\${context}/||' | LC_ALL=C sort -u
 )
-grep -Fxq 'HOST_ID=plugin' "${output}/manifest/build.env"
-grep -Fxq "HOST_TAGS=''" "${output}/manifest/build.env"
-jq -e '.abi.build.hosts == [
-  {"id":"plugin","tags":[],"tag_suffix":"-plugin"},
-  {"id":"ai-plugin","tags":["with_ai"],"tag_suffix":"-ai-plugin"}
-]' "${output}/manifest/plugin-abi.json" >/dev/null
+grep -Fxq "GOARCH=amd64" "${output}/manifest/build.env"
+grep -Eq '^ABI_ID=abi-[0-9a-f]{64}$' "${output}/manifest/build.env"
+if grep -Eq '^(HOST_ID|HOST_TAGS|HOST_VARIANTS|SERVER_REVISION|PLUGIN_WORKSPACE)=' \
+  "${output}/manifest/build.env"; then
+  die 'the SDK environment still exports a host or packaging variable'
+fi
+# Hosts are distribution, not ABI: the manifest the image carries names only the ABI
+# closure and its identity, so a host edit cannot move the published bytes' identity.
+jq -e --arg abi "$(jq -r '.abi_id' "${test_root}/lock.json")" '
+  .abi_id == $abi and (has("distribution") | not) and
+  (.abi.build | has("hosts") | not)' "${output}/manifest/plugin-abi.json" >/dev/null
 cmp -s "${test_root}/module-list.txt" "${output}/manifest/module-list.txt"
 grep -Fqx $'github.com/rulego/rulego\t'"${core_version}"$'\tfalse\t\t\th1:module\th1:gomod' \
   "${output}/manifest/host-modules.tsv"

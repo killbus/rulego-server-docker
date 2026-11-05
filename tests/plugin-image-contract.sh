@@ -63,7 +63,7 @@ assert_contains scripts/plugin-abi-build.sh "legacy_sdk_ref=\$(jq -er '.referenc
 assert_contains scripts/plugin-abi-build.sh 'load "${runtime_ref}" "${arch}" "${work}/sdk-output/legacy-sdk-probe-${arch}.so"'
 assert_contains scripts/plugin-abi-build.sh '--entrypoint /usr/local/bin/build-plugin-host'
 assert_contains scripts/plugin-abi-build.sh 'Dockerfile.plugin-runtime'
-assert_contains scripts/plugin-abi-build.sh 'staging-${packaging_revision}-${arch}${tag_suffix}'
+assert_contains scripts/plugin-abi-build.sh 'staging-${packaging_revision}-${arch}-${host_id}'
 # Image bytes are decided by the lock, not by which commit ran the build. A per-commit value in an
 # image label or an index annotation moves the child digest of every artifact, so a canonical tag
 # could never compare equal to its own content and republishing an unchanged contract would read as
@@ -80,7 +80,9 @@ if grep -R -E -q 'PLUGIN_ABI_PACKAGING_[A-Z]+=' scripts .github tests; then
   exit 1
 fi
 assert_contains scripts/plugin-abi-build.sh '--env "RULEGO_HOST_ID=${host_id}"'
-assert_contains scripts/build-plugin-host 'IFS='"'"';'"'"' read -r -a host_variants <<<"${HOST_VARIANTS}"'
+assert_contains scripts/plugin-abi-build.sh '--env "HOST_TAGS=${host_tags}"'
+assert_contains scripts/build-plugin-host '[[ -v HOST_TAGS ]]'
+assert_contains scripts/plugin-abi-build.sh '[[ ",${host_tags}," == *",with_ai,"* || ",${host_tags}," == *",with_all,"* ]]'
 if grep -Eq '(^|[^[:alnum:]_])jq([^[:alnum:]_]|$)' scripts/build-plugin-host; then
   echo 'host builder depends on jq, which is absent from compatibility SDK images' >&2
   exit 1
@@ -103,9 +105,10 @@ fi
 assert_contains scripts/plugin-abi-publish.sh 'publish_immutable_image_tag'
 assert_contains scripts/lib.sh 'immutable tag already resolves to different images'
 assert_contains scripts/plugin-abi-publish.sh 'verify-plugin-oci.sh'
-assert_contains scripts/plugin-abi-publish.sh 'expected_staging=${runtime_repository}:staging-${packaging_revision}-${arch}${tag_suffix}'
+assert_contains scripts/plugin-abi-publish.sh 'expected_staging=${runtime_repository}:staging-${packaging_revision}-${arch}-${host_id}'
 assert_contains scripts/plugin-abi-publish.sh 'runtime_staging_indexes='
-assert_contains scripts/verify-plugin-oci.sh 'render size-limit "${arch}" "${host_id}"'
+assert_contains scripts/verify-plugin-oci.sh 'size_limit_args+=("${host_id}")'
+assert_contains scripts/verify-plugin-oci.sh 'render size-limit "${size_limit_args[@]}"'
 assert_contains scripts/plugin-abi-build.sh 'dd of="${work}/wrong-arch.so"'
 assert_contains scripts/plugin-abi-build.sh '-gcflags=all=-N'
 
@@ -124,7 +127,7 @@ assert_contains "${publish_workflow}" 'packages: write'
 assert_contains "${publish_workflow}" 'run: scripts/promote-runtime-aliases.sh tmp/plugin-abi-release.json'
 publish_step_line=$(grep -Fn 'run: scripts/plugin-abi-publish.sh tmp/evidence' "${publish_workflow}" | cut -d: -f1)
 promote_step_line=$(grep -Fn 'run: scripts/promote-runtime-aliases.sh' "${publish_workflow}" | cut -d: -f1)
-(( ${promote_step_line} > ${publish_step_line} )) || {
+(( promote_step_line > publish_step_line )) || {
   echo 'the runtime alias promotion runs before the immutable publication it is licensed by' >&2
   exit 1
 }

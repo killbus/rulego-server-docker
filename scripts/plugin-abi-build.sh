@@ -69,10 +69,12 @@ packaging_revision=${GITHUB_SHA:?GITHUB_SHA is required}
 # contract impossible to republish. See `render metadata` in scripts/plugin-abi.sh.
 
 label_args() {
-  local variant=$1 host_id=${2:-plugin} label
+  local variant=$1 host_id=${2:-} label
+  local -a args=("${variant}" "${arch}")
+  [[ -z ${host_id} ]] || args+=("${host_id}")
   IMAGE_LABELS=()
   while IFS= read -r label; do IMAGE_LABELS+=(--label "${label}"); done < <(
-    "${script_dir}/plugin-abi.sh" render metadata "${variant}" "${arch}" "${host_id}" |
+    "${script_dir}/plugin-abi.sh" render metadata "${args[@]}" |
       jq -r 'to_entries[] | "\(.key)=\(.value)"'
   )
 }
@@ -218,10 +220,12 @@ docker run --rm --platform "${platform}" --entrypoint bash \
       go -C /workspace build "-buildmode=$PLUGIN_MODE" -gcflags=all=-N "${flags[@]}" "${ldflags[@]}" -o /output/plugin.so .
   '
 verify_child() {
-  local variant=$1 ref=$2 host_id=${3:-plugin} expected labels container copied
+  local variant=$1 ref=$2 host_id=${3:-} expected labels container copied
+  local -a metadata_args=("${variant}" "${arch}")
+  [[ -z ${host_id} ]] || metadata_args+=("${host_id}")
   retry_command 4 2 docker pull --platform "${platform}" "${ref}" >/dev/null
   labels=$(docker image inspect "${ref}" --format '{{json .Config.Labels}}')
-  expected=$("${script_dir}/plugin-abi.sh" render metadata "${variant}" "${arch}" "${host_id}")
+  expected=$("${script_dir}/plugin-abi.sh" render metadata "${metadata_args[@]}")
   jq -e --argjson expected "${expected}" '. as $labels | $expected | to_entries | all(.[]; $labels[.key] == .value)' \
     <<<"${labels}" >/dev/null || die "${variant} child labels differ from the lock"
   container=$(docker create --platform "${platform}" "${ref}")
@@ -236,7 +240,7 @@ verify_child() {
 sdk_compressed=$(verify_child plugin-sdk "${sdk_ref}")
 sdk_uncompressed=$(docker image inspect "${sdk_ref}" --format '{{.Size}}')
 runtime_evidence='{}'
-while IFS=$'\t' read -r host_id tag_suffix; do
+while IFS=$'\t' read -r host_id host_tags; do
   runtime_context=${work}/runtime-context-${host_id}
   runtime_repository=localhost:5000/plugin-runtime-${host_id}-${arch}
   runtime_staging=''
@@ -252,6 +256,7 @@ while IFS=$'\t' read -r host_id tag_suffix; do
   docker run --rm --platform "${platform}" --user "$(id -u):$(id -g)" \
     --entrypoint /usr/local/bin/build-plugin-host \
     --env RULEGO_EDITOR_SOURCE=/input/editor --env "RULEGO_HOST_ID=${host_id}" \
+    --env "HOST_TAGS=${host_tags}" \
     --env RULEGO_OUTPUT_ROOT=/out/rootfs \
     --volume "${context}/runtime/editor:/input/editor:ro" \
     --volume "${app_root}:/out/rootfs" "${sdk_ref}"
@@ -288,7 +293,9 @@ while IFS=$'\t' read -r host_id tag_suffix; do
   "${script_dir}/verify-plugin-runtime.sh" load "${runtime_ref}" "${arch}" "${work}/sdk-output/sdk-probe-${arch}.so"
   "${script_dir}/verify-plugin-runtime.sh" load "${runtime_ref}" "${arch}" "${work}/sdk-output/legacy-sdk-probe-${arch}.so"
   component_expectation=absent
-  [[ ${host_id} != ai-plugin ]] || component_expectation=present
+  if [[ ",${host_tags}," == *",with_ai,"* || ",${host_tags}," == *",with_all,"* ]]; then
+    component_expectation=present
+  fi
   "${script_dir}/verify-plugin-runtime.sh" component "${runtime_ref}" "${arch}" \
     "${component_expectation}" ai/agent
   "${script_dir}/verify-plugin-runtime.sh" reject "${runtime_ref}" "${arch}" "${work}/wrong-arch.so"
@@ -306,7 +313,7 @@ while IFS=$'\t' read -r host_id tag_suffix; do
   fi
 
   if [[ ${stage} == true ]]; then
-    runtime_staging="ghcr.io/${owner}/${runtime_image}:staging-${packaging_revision}-${arch}${tag_suffix}"
+    runtime_staging="ghcr.io/${owner}/${runtime_image}:staging-${packaging_revision}-${arch}-${host_id}"
     retry_command 4 2 docker buildx imagetools create --tag "${runtime_staging}" \
       "${runtime_repository}@${runtime_index}"
     inspect_native "${runtime_staging}" "${work}/runtime-staging-${host_id}.json"
@@ -324,7 +331,7 @@ while IFS=$'\t' read -r host_id tag_suffix; do
       compressed_size:$compressed,
       uncompressed_size:$uncompressed
     }' <<<"${runtime_evidence}")
-done < <(jq -r '.hosts[] | [.id, .tag_suffix] | @tsv' <<<"${ci_json}")
+done < <(jq -r '.hosts[] | [.id, (.tags | join(","))] | @tsv' <<<"${ci_json}")
 
 if [[ $(jq -er '.release_state' <<<"${ci_json}") == ready ]]; then
   limits=$("${script_dir}/plugin-abi.sh" render size-limit "${arch}" plugin)

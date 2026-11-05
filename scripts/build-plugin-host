@@ -7,7 +7,6 @@ build_environment=${RULEGO_BUILD_ENV:-/opt/rulego/build.env}
 manifest=${RULEGO_ABI_MANIFEST:-/abi-manifest.json}
 output_root=${RULEGO_OUTPUT_ROOT:-/out/rootfs}
 editor_source=${RULEGO_EDITOR_SOURCE:-/opt/rulego/editor}
-requested_host=${RULEGO_HOST_ID:-plugin}
 
 die() {
   printf 'error: %s\n' "$*" >&2
@@ -23,18 +22,11 @@ source "${build_environment}"
 # design: it would put release policy inside the image bytes.
 [[ "sha256:$(sha256sum "${manifest}" | awk '{print $1}')" == "${ABI_MANIFEST_DIGEST}" ]] ||
   die 'Plugin ABI manifest digest mismatch'
-host_found=false
-IFS=';' read -r -a host_variants <<<"${HOST_VARIANTS}"
-for host_variant in "${host_variants[@]}"; do
-  host_id=${host_variant%%=*}
-  host_tags=${host_variant#*=}
-  if [[ ${host_id} == "${requested_host}" ]]; then
-    HOST_TAGS=${host_tags}
-    host_found=true
-    break
-  fi
-done
-[[ ${host_found} == true ]] || die "unknown host variant: ${requested_host}"
+# The host identity is distribution metadata, not part of the SDK environment. The build
+# job passes the tags for this host explicitly, and an unset variable is refused rather
+# than read as "no optional components".
+[[ -v HOST_TAGS ]] || die 'HOST_TAGS is required (an empty value is allowed)'
+printf 'building host %s with tags: %s\n' "${RULEGO_HOST_ID:-unknown}" "${HOST_TAGS}" >&2
 [[ $(GOENV="${GOENV}" GOTOOLCHAIN="${GOTOOLCHAIN}" go env GOVERSION) == "go${GO_VERSION}" ]] || die 'host Go version mismatch'
 [[ $(GOENV="${GOENV}" GOTOOLCHAIN="${GOTOOLCHAIN}" go env GOARCH) == "${GOARCH}" ]] || die 'host architecture mismatch'
 [[ $("${CC}" -dumpfullversion) == "${CC_VERSION}" ]] || die 'host C compiler mismatch'

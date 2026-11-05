@@ -17,10 +17,15 @@ script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 repository_root=$(cd -- "${script_dir}/.." && pwd)
 # shellcheck source=scripts/lib.sh
 source "${repository_root}/scripts/lib.sh"
+# shellcheck source=tests/helpers.sh
+source "${repository_root}/tests/helpers.sh"
 
 mkdir -p "${repository_root}/tmp"
 test_root=$(mktemp -d "${repository_root}/tmp/plugin-abi-alias-track.XXXXXX")
 trap 'rm -rf -- "${test_root}"' EXIT
+ready_lock_file=${test_root}/ready.lock
+ready_lock "${repository_root}/plugin-abi.lock" "${ready_lock_file}"
+export PLUGIN_ABI_LOCK=${ready_lock_file}
 registry_dir=${test_root}/registry
 log_file=${test_root}/docker.log
 move_dir=${test_root}/alias-moves
@@ -126,7 +131,7 @@ wipe_registry() {
 # exists to catch.
 tags=$(PLUGIN_ABI_NAME_REVISION=${revision} "${repository_root}/scripts/plugin-abi.sh" render tags --release)
 mapfile -t hosts < <(jq -r '.runtime | keys_unsorted | sort | .[]' <<<"${tags}")
-(( ${#hosts[@]} == 2 )) || die "this suite needs the locked host set to have two entries, found ${#hosts[@]}"
+(( ${#hosts[@]} == 3 )) || die "this suite needs the locked host set to have three entries, found ${#hosts[@]}"
 first=${hosts[0]}
 second=${hosts[1]}
 first_alias_tag=$(jq -er --arg h "${first}" '.runtime[$h].alias | split(":")[1]' <<<"${tags}")

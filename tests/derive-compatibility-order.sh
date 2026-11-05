@@ -25,7 +25,7 @@ test_root=$(mktemp -d "${repository_root}/tmp/derive-compatibility-order.XXXXXX"
 trap 'rm -rf -- "${test_root}"' EXIT
 mkdir -p "${test_root}/bin" "${test_root}/registry" "${test_root}/repo"
 
-sdk_image=$(jq -er '.release.sdk_image' plugin-abi.lock)
+sdk_image=$(jq -er '.distribution.release.sdk_image' plugin-abi.lock)
 self_abi=$(jq -er '.abi_id' plugin-abi.lock)
 
 # Names and digests are computed from the scenario, never typed. An expected digest written into this file
@@ -98,7 +98,7 @@ release() {
   local when=${1:?an instant is required} message=${2:?a message is required} abi=${3:?a canonical identity is required}
   local revision
 
-  jq -c --arg abi "${abi}" '.abi_id = $abi | del(.compatibility)' plugin-abi.lock \
+  jq -c --arg abi "${abi}" '.abi_id = $abi | del(.distribution.compatibility)' plugin-abi.lock \
     >"${test_root}/repo/plugin-abi.lock"
   git_in_repo add plugin-abi.lock
   commit_at "${when}" "${message}"
@@ -281,7 +281,7 @@ assert_block 'auto derived a block that is not the newest published generation' 
 
 # A record naming the newest generation is accepted, and the acceptance says so out loud: the gate has to be
 # readable as a pass, not just as the absence of a failure.
-jq --argjson block "${derived}" '.compatibility.previous_sdk = $block' "${current_lock}" \
+jq --argjson block "${derived}" '.distribution.compatibility.previous_sdk = $block' "${current_lock}" \
   >"${test_root}/current-record.lock"
 check_lock "${test_root}/current-record.lock" >/dev/null || {
   echo 'the gate refused a record naming the newest published generation' >&2
@@ -295,7 +295,7 @@ stale=$(helper derive "${mid_rev}") || {
   echo 'the middle generation could not be derived' >&2
   exit 1
 }
-jq --argjson block "${stale}" '.compatibility.previous_sdk = $block' "${current_lock}" \
+jq --argjson block "${stale}" '.distribution.compatibility.previous_sdk = $block' "${current_lock}" \
   >"${test_root}/stale-record.lock"
 refusal 'a record one generation behind' 'is not the newest published generation' \
   check_lock "${test_root}/stale-record.lock"
@@ -345,7 +345,7 @@ assert_block 'derive by identity did not answer with the published bytes' \
 # A gate that cannot tell where it is being pointed still has to be checked against the registry, so an
 # undated winner is accepted by the freshness half rather than argued with.
 jq --argjson block "$(helper derive "${gen_new}")" \
-  '.compatibility.previous_sdk = $block' "${current_lock}" >"${test_root}/undated-record.lock"
+  '.distribution.compatibility.previous_sdk = $block' "${current_lock}" >"${test_root}/undated-record.lock"
 check_lock "${test_root}/undated-record.lock" >/dev/null || {
   echo 'the gate refused a record naming the newest generation, which this checkout cannot date' >&2
   exit 1
@@ -491,7 +491,7 @@ standard_tags
 # A record naming a registry whose tags this script cannot list. Its digests still match, so only the
 # ordering half can notice -- and the reason it gives has to be the listing, not an empty list.
 jq --arg repository "example.com/killbus/${sdk_image}" \
-  '.compatibility.previous_sdk.repository = $repository' "${test_root}/current-record.lock" \
+  '.distribution.compatibility.previous_sdk.repository = $repository' "${test_root}/current-record.lock" \
   >"${test_root}/other-host.lock"
 refusal 'a record naming a registry whose tags cannot be listed' \
   'tags can only be listed from ghcr.io' check_lock "${test_root}/other-host.lock"
