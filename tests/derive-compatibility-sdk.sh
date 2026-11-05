@@ -15,6 +15,8 @@ script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 repository_root=$(cd -- "${script_dir}/.." && pwd)
 cd "${repository_root}"
 
+source "${repository_root}/tests/helpers.sh"
+
 mkdir -p "${repository_root}/tmp"
 test_root=$(mktemp -d "${repository_root}/tmp/derive-compatibility-sdk.XXXXXX")
 trap 'rm -rf -- "${test_root}"' EXIT
@@ -30,9 +32,14 @@ attestation=sha256:$(printf '0%.0s' {1..64})
 config_digest=sha256:$(printf '9%.0s' {1..64})
 
 # The revision stands for an earlier release: a published generation with its own identity. It cannot
-# be HEAD, because a lock may not record itself as its own predecessor; pasting HEAD's identity would
-# only ever exercise that schema rule.
-work_lock=$(git show HEAD:plugin-abi.lock)
+# be HEAD, because after this contract is committed HEAD *is* the current lock, and a lock may not
+# record itself as its own predecessor. Synthesize a predecessor with a different build determinant and
+# a recomputed identity so the fixture does not depend on the checkout's commit history.
+previous_lock_file=${test_root}/previous.lock
+jq '.abi.rulego_server.revision = "b31cbc7963181a5d7d5298d6e03e195a93f498a3"' \
+  plugin-abi.lock >"${previous_lock_file}"
+refresh_abi_id "${previous_lock_file}"
+work_lock=$(cat "${previous_lock_file}")
 previous_abi_id=$(jq -er '.abi_id' <<<"${work_lock}")
 printf '%s\n' "${work_lock}" >"${test_root}/repo/plugin-abi.lock"
 sdk_image=$(jq -er '.distribution.release.sdk_image // .release.sdk_image' \

@@ -170,12 +170,12 @@
     },
     "compatibility": {
       "previous_sdk": {
-        "abi_id": "abi-7ef7f30db8598b7fdce710287df49bdb047d165749b749fe86c0ef448daf0c3f",
+        "abi_id": "abi-af0e7765afa339934f9a8bc41b71bbe45176c48f173f5909732867c48fbd6bee",
         "repository": "ghcr.io/killbus/rulego-plugin-sdk",
-        "index_digest": "sha256:63fc0f773263a12691a27b5a573c824b1d85b7c6899bc6109dc06e000a70b2d4",
+        "index_digest": "sha256:ec9c5e70bd032cbce3fee30b990ec8cbb1adaa1e561fb141327f26032057c15d",
         "children": {
-          "amd64": "sha256:ba86df20e6bbd36703df304fcd1b16531eda40795b34c1a53fc2963e33283ab0",
-          "arm64": "sha256:1c692db6d7b7a5c273ecf3a532b7a27c538058d21beb62ede725941b2f7786b7"
+          "amd64": "sha256:fe937acde73e0b8f9d2723e34772896bc260a5c26d4ac96470a8e5ffa420b4eb",
+          "arm64": "sha256:b3d63b65741194ca9853f34fe604c2dc56bb987a1909e6e94ecd8d945e87019b"
         }
       }
     },
