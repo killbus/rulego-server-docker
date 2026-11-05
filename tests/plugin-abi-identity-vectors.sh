@@ -67,7 +67,7 @@ recipe_domain=tests/fixtures/plugin-abi-identity/recipe.canonical
 
 abi_id_v0=abi-feccf60c9e5fb611b2fb5e71bb606943a1be39d356050eea74ffb025962a050f
 recipe_id_v0=recipe-33955b884529aa42bc1ece6b5c9894840a5e9c43ddae9d0b90998c2a57a5f806
-lock_digest_v0=sha256:05db10ef7352afb2c19b2543acfc3d9b6c1f2a43ded96276d097487113055aa6
+lock_digest_v0=sha256:49da0eb599947ed0dbadcff4c205cd9ecfd5db3262c787405df4053cac954d4a
 manifest_digest_v0=sha256:d6ec632cdadc7534f8f44441d58fd3fff6fbdc5655a7072618ec16f9587969a7
 
 cmp -s <(canonical_abi_bytes plugin-abi.lock) "${domain}" ||
@@ -155,26 +155,26 @@ vector amd64-runner \
   '.distribution.release.ci.runners.amd64 = "ubuntu-24.04-alt"' \
   stable stable \
   "${abi_id_v0}" "${recipe_id_v0}" \
-  sha256:b71ecbc24d731e77dc5c67655c8cdb4d6a6ed984831171820956f564406680c3 \
+  sha256:cb4097e34bf4962673a871b1b13b8b49b6ca01685c8bccc0eba5e160aaa0c2d3 \
   "${manifest_digest_v0}"
 vector sdk-repository \
   '.distribution.release.sdk_image = "rulego-plugin-sdk-alt"' \
   stable stable \
   "${abi_id_v0}" "${recipe_id_v0}" \
-  sha256:fa848385c6b7d5f406aaf55bf8de3279dee73bfaf4731c9e1692fa244551f5ae \
+  sha256:a43c8e4e3fb8c920cc9cb3e6ba02a6ac1fc0af6c7eea7c3780bfdeea17157067 \
   "${manifest_digest_v0}"
 vector runtime-repository \
   '.distribution.release.runtime_image = "rulego-server-alt"' \
   stable stable \
   "${abi_id_v0}" "${recipe_id_v0}" \
-  sha256:7b80caa6cdb8cc4f827a7b9bafa0da8522d8f60dc801907151604b42949f047b \
+  sha256:547ff23439b369f7232d64109beec4602ddedbd9f97ef37b4ae7b4ffae79a219 \
   "${manifest_digest_v0}"
 vector previous-sdk-index \
   '.distribution.compatibility.previous_sdk.index_digest =
      "sha256:0000000000000000000000000000000000000000000000000000000000000001"' \
   stable stable \
   "${abi_id_v0}" "${recipe_id_v0}" \
-  sha256:8c0118bb6bbec439c84c1c0b61d465df4de47b237c6b5ccface0ea853086ab79 \
+  sha256:b7eec1e5446e8464811aaa3d93f0432b9273927e2c4166ea3de8f27f60976d3d \
   "${manifest_digest_v0}"
 
 # Recipe inputs: abi_id stays, recipe_id moves.
@@ -182,46 +182,46 @@ vector embedded-manifest-path \
   '.distribution.recipe.manifest_path = "/other/plugin-abi.json"' \
   stable changes \
   "${abi_id_v0}" recipe-c71282e8a75c277a5d094a78b1253d0635ba12fb6ff82471cc19fc9828abe0ac \
-  sha256:a1224c1084ee451efbdd3cac86f1ce76f3d22ad2ac83d942553f3581e8bac4a2 \
+  sha256:95cfddfbf19e11ec5404dd94df2ea2b510c3dbca61e2b2f156f4b77f14752e67 \
   "${manifest_digest_v0}"
 vector reproducible-epoch \
   '.distribution.recipe.reproducible_epoch = 1700000001' \
   stable changes \
   "${abi_id_v0}" recipe-690daf69922a5933bd7544c3d4724713ea6d25c59f34679cb9ad6b3f294ec9d7 \
-  sha256:46e185ff4fa2cefbf7200d845f5311626d70e1579560d984d8e2a2b75e666548 \
+  sha256:95ccae32ec7a6fdf9e310d735c9e76a3fce62f4d844d1cef7cceef94cda908e4 \
   "${manifest_digest_v0}"
 vector editor-asset-digest \
   '.distribution.recipe.editor_payload.asset.sha256 =
      "0000000000000000000000000000000000000000000000000000000000000001"' \
   stable changes \
   "${abi_id_v0}" recipe-109dde2c22ad9c995af1cd99c26e429732c206c53be8981383ea9e41fdadbac8 \
-  sha256:1c263da757cb07a585923a67dedd158ee638dccd192654315b08c7d37d0e3c2d \
+  sha256:88cee0bbcca17cd06b5cb52b77229a31c0aa1a17be03d3987da2bb2d6b0bc865 \
   "${manifest_digest_v0}"
 
 # ABI inputs: abi_id moves, recipe_id stays.
 vector go-version '.abi.go.version = "1.25.1"' \
   changes stable \
   abi-8a2a4fb314fbbea0e4f56f6a38904ab95a499658e91b0ee3cdcca988ecfe2754 "${recipe_id_v0}" \
-  sha256:652636647860089d4d59cbfabf79d74f7a805fd46adcfd6641d54bcb0e497553 \
+  sha256:038e6011437cf3be589a3c434fa74348dc1b919d7df2a544b3f405b8d702effa \
   sha256:173b16c284edf19582b29a1e4b268ce69d04480bf3d518d1a9cfd64933ad5e62
 vector module-graph-list-digest \
   '.abi.module_graph.list_sha256 =
      "0000000000000000000000000000000000000000000000000000000000000001"' \
   changes stable \
   abi-a3e18a99e4b2272aa2588de334620f94411bb34596dddc48e8ea7d4e966fc5cc "${recipe_id_v0}" \
-  sha256:49338a5dd770aa9ca6010b8c025247097037d91c4dcfe540a849d4dc13e75744 \
+  sha256:1e6aedd6e12f39223d210ce051e46db8b83bb9cea52b82363ca1a1b790e1e8f4 \
   sha256:4d1dc96336b92049d80ce4fe995f678009ad83939f920dab1d36310a82e2fa33
 vector server-revision \
   '.abi.rulego_server.revision = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"' \
   changes stable \
   abi-dca86d5f6fc70f999ae905eaa4330d55800a8caf8bac6a4caed157bfd9c87ca1 "${recipe_id_v0}" \
-  sha256:3cf78b4f14136cfaae0816a1d33f2cc45fdd9b6b7586d078d8090bf6ead81a30 \
+  sha256:7720f036a93bdfd86c4623bbea4b6db2b1517a7813076965ef13e331dc6de2d2 \
   sha256:4264d13e8a13cbe35b216775abfe120e522bf8a05edd575eb87e56a3002a0a28
 vector core-revision \
   '.abi.rulego_core.revision = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"' \
   changes stable \
   abi-b50607b53ef0becc455795d8e23b83e96e1ea990ed6541bc320cc1c80bec43bc "${recipe_id_v0}" \
-  sha256:4add92312cfef676c30d3bb04ca4e217d0a4aa10def721f47a7dcf14ccd05fd3 \
+  sha256:05a74743173db4a2397cc737e6c9a47bd9fa4d5106ee337558a936a0f9768071 \
   sha256:d6e142dd01f8fde65b0037fa4bd1777da16494b44c503d5241c90cf8564f1458
 
 # The schema keeps distribution out of `.abi`; a lock that reintroduces any removed field is a
