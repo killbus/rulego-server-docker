@@ -273,7 +273,7 @@ The lock is release-ready only after a maintainer reviews a successful
 candidate size report, records positive ceilings, and reruns the full matrix.
 External publication uses the separate
 [Plugin ABI publication workflow](.github/workflows/plugin-abi-publish.yml).
-It accepts an explicit `publish=true` manual dispatch and approval of the
+It accepts an explicit `publish=true` manual dispatch and runs in the
 `plugin-abi-release` environment, and the normal
 [release workflow](.github/workflows/publish.yml) calls it as a reusable
 workflow after the legacy `standard`/`all` images are verified. The automatic
@@ -281,7 +281,11 @@ call runs only when the lock is `ready`, its
 `.abi.rulego_server.release_version` equals the resolved upstream version,
 `should_build` is true, and the run is not staging-only. It passes
 `promote_aliases=is_latest`, so publishing an older stable release writes its
-immutable canonicals without moving `v<release>-<host>` backwards. Native jobs stage their verified images with
+immutable canonicals without moving `v<release>-<host>` backwards. Because the
+same `should_build` gate stops the daily schedule once the legacy tags are
+complete, a failed first ABI publication is recovered by rerunning the failed
+run or dispatching this workflow with `publish=true`, not by the next scheduled
+run. Native jobs stage their verified images with
 commit-qualified tags; the release job creates two-platform indexes without
 rebuilding, enforces first-writer immutable canonical tags, and verifies the
 returned GHCR digests before producing its release record. Only after that record exists does it
